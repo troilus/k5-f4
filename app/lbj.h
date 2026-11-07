@@ -29,4 +29,7 @@ void LBJ_Draw(void);
 /* Stop the FSK engine now (mode change, TX). */
 void LBJ_StopSampler(void);
 
+/* Key hook: PTT sends the fixed LBJ test frame when ENABLE_LBJ_TX is set. */
+bool LBJ_HandleKey(uint8_t key, bool pressed, bool held);
+
 #endif /* APP_LBJ_H */

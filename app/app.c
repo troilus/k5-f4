@@ -2076,6 +2076,12 @@ static void ProcessKey(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld)
     if (TDCS_HandleKey((uint8_t)Key, bKeyPressed, bKeyHeld))
         goto Skip;
 #endif
+#ifdef ENABLE_LBJ
+    /* PTT in LBJ mode sends the fixed test frame; the normal PTT path is
+     * bypassed because LBJ is otherwise a receive-only modulation. */
+    if (LBJ_HandleKey((uint8_t)Key, bKeyPressed, bKeyHeld))
+        goto Skip;
+#endif
 
     if (bFlag) {
         goto Skip;

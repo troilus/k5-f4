@@ -16,9 +16,14 @@
 #include "lbj.h"
 #include "lbj_dec.h"
 
+#include "audio.h"
 #include "driver/bk4819.h"
+#include "driver/keyboard.h"
 #include "driver/st7565.h"
+#include "driver/system.h"
+#include "frequencies.h"
 #include "functions.h"
+#include "helper/battery.h"
 #include "misc.h"
 #include "radio.h"
 #include "settings.h"
@@ -52,6 +57,8 @@ static struct {
     uint8_t  bcdLen;
     uint32_t addr;
     uint32_t lastFreq;
+    uint8_t  txState;    /* 0 idle, 1 sending, 2 sent, 3 denied */
+    uint16_t txTick;
 } g;
 
 /* ---- small formatting helpers ------------------------------------------ */
@@ -177,6 +184,121 @@ void lbj_emit_msg(const lbj_rx_t *r, const char *bcd, uint16_t len)
     g.dirty  = true;
 }
 
+/* ---- transmitter ------------------------------------------------------- */
+
+#ifdef ENABLE_LBJ_TX
+/* POCSAG batch for the fixed LBJ test message:
+ *   address 1234000, function 3, short block "123400080 01234".
+ * Slot 0 is the address word, slots 1..3 the message words, slots 4..15 the
+ * idle word.  These are the corrected codewords the K5 RX decodes. */
+static const uint32_t LBJ_TX_BATCH[16] = {
+    0x4B515A86u, 0xC2610751u, 0x80081E6Au, 0x842613B7u,
+    0x7A89C197u, 0x7A89C197u, 0x7A89C197u, 0x7A89C197u,
+    0x7A89C197u, 0x7A89C197u, 0x7A89C197u, 0x7A89C197u,
+    0x7A89C197u, 0x7A89C197u, 0x7A89C197u, 0x7A89C197u,
+};
+
+static void lbj_tx_config(void)
+{
+    BK4819_ResetFSK();
+
+    BK4819_WriteRegister(BK4819_REG_70, 0x00C3u);   /* tone2 on, gain       */
+    BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* 1200 baud            */
+    BK4819_WriteRegister(BK4819_REG_58, 0x00C1u);   /* FSK 1.2K TX/RX       */
+    BK4819_WriteRegister(BK4819_REG_5C, 0xAA30u);   /* no CRC               */
+    BK4819_WriteRegister(BK4819_REG_5D, 0x3F00u);   /* 64 bytes = 16 words  */
+    BK4819_WriteRegister(BK4819_REG_5E, 0x3204u);
+    BK4819_WriteRegister(BK4819_REG_5A, 0x7CD2u);   /* POCSAG sync          */
+    BK4819_WriteRegister(BK4819_REG_5B, 0x15D8u);
+}
+
+static void lbj_tx_send(void)
+{
+    if (!LBJ_RxVfoIsLbj())
+        return;
+
+    if (gBatteryDisplayLevel == 0 || gBatteryDisplayLevel > 6) {
+        g.txState   = 3u;
+        gBeepToPlay = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
+        g.dirty     = true;
+        return;
+    }
+
+    /* The branch keeps the CN HAM F Lock for every normal mode.  The LBJ
+     * test transmission is the one deliberate exception: release the lock
+     * only while this frame is on air, then put it back. */
+    const uint8_t savedLock = gSetting_F_LOCK;
+    gSetting_F_LOCK = F_LOCK_NONE;
+
+    if (TX_freq_check(gCurrentVfo->pTX->Frequency) != 0) {
+        gSetting_F_LOCK = savedLock;
+        g.txState   = 3u;
+        gBeepToPlay = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
+        g.dirty     = true;
+        return;
+    }
+
+    LBJ_StopSampler();
+
+    g.txState = 1u;
+    g.txTick  = 0u;
+
+    /* Configure the FSK modem before keying the PA (the beam/tdcstx order). */
+    lbj_tx_config();
+
+    RADIO_SetTxParameters();
+
+    BK4819_WriteRegister(BK4819_REG_51, 0x0000u);   /* no CTCSS/DCS        */
+    BK4819_WriteRegister(BK4819_REG_3F, 0x8000u);   /* FSK TX finished     */
+    BK4819_WriteRegister(BK4819_REG_59, 0x8068u);   /* clear TX FIFO       */
+    BK4819_WriteRegister(BK4819_REG_59, 0x0068u);
+
+    for (uint8_t i = 0; i < 16u; i++) {
+        BK4819_WriteRegister(BK4819_REG_5F,
+                             (uint16_t)(LBJ_TX_BATCH[i] >> 16));
+        BK4819_WriteRegister(BK4819_REG_5F,
+                             (uint16_t)LBJ_TX_BATCH[i]);
+    }
+
+    SYSTEM_DelayMs(20);
+    BK4819_WriteRegister(BK4819_REG_59, 0x2868u);   /* FSK TX enable       */
+
+    for (uint16_t t = 0; t < 400u; t++) {
+        if (BK4819_ReadRegister(BK4819_REG_0C) & 1u)
+            break;
+        SYSTEM_DelayMs(5);
+    }
+
+    BK4819_WriteRegister(BK4819_REG_02, 0x0000u);
+    SYSTEM_DelayMs(20);
+    BK4819_ResetFSK();
+    RADIO_SetupRegisters(true);
+
+    gSetting_F_LOCK = savedLock;
+
+    g.txState   = 2u;
+    g.txTick    = 0u;
+    gBeepToPlay = BEEP_1KHZ_60MS_OPTIONAL;
+    g.dirty     = true;
+}
+#endif /* ENABLE_LBJ_TX */
+
+bool LBJ_HandleKey(uint8_t key, bool pressed, bool held)
+{
+#ifdef ENABLE_LBJ_TX
+    if (key == KEY_PTT && LBJ_RxVfoIsLbj()) {
+        if (pressed && !held)
+            lbj_tx_send();
+        return true;
+    }
+#else
+    (void)key;
+    (void)pressed;
+    (void)held;
+#endif
+    return false;
+}
+
 /* ---- interrupts -------------------------------------------------------- */
 
 void LBJ_HandleInterrupts(uint16_t bits)
@@ -262,8 +384,16 @@ void LBJ_Tick(void)
     if (!g.on)
         lbj_start();
 
+    if (g.txState) {
+        if (++g.txTick >= 300u) {      /* 3 s */
+            g.txState      = 0u;
+            g.txTick       = 0u;
+            gUpdateDisplay = true;
+        }
+    }
+
     if (g.dirty) {
-        g.dirty      = false;
+        g.dirty        = false;
         gUpdateDisplay = true;
     }
 }
@@ -293,10 +423,12 @@ void LBJ_Draw(void)
     *o = '\0';
     UI_PrintStringSmallNormal(s, 0, 0, 1);
 
+    /* Three 16-bit words per row: four of them (19 chars, 133 px) run off
+     * the 128 px display and merge the last two words. */
     for (uint8_t row = 0; row < 2u; row++) {
         o = s;
-        for (uint8_t i = 0; i < 4u; i++) {
-            const uint8_t k = (uint8_t)(row * 4u + i);
+        for (uint8_t i = 0; i < 3u; i++) {
+            const uint8_t k = (uint8_t)(row * 3u + i);
             if (k >= g.rawCount)
                 break;
             o = puthex4(o, g.raw[k]);
@@ -325,6 +457,13 @@ void LBJ_Draw(void)
     } else {
         UI_PrintStringSmallNormal("WAIT POCSAG...", 0, 0, 4);
     }
+
+    if (g.txState == 1u)
+        UI_PrintStringSmallNormal("TX...", 0, 0, 6);
+    else if (g.txState == 2u)
+        UI_PrintStringSmallNormal("TX SENT", 0, 0, 6);
+    else if (g.txState == 3u)
+        UI_PrintStringSmallNormal("TX DENIED", 0, 0, 6);
 
     ST7565_BlitStatusLine();
     ST7565_BlitFullScreen();
