@@ -58,9 +58,32 @@ static struct {
     uint8_t  bcdLen;
     uint32_t addr;
     uint32_t lastFreq;
-    uint8_t  txState;    /* 0 idle, 1 sending, 2 sent, 3 denied */
+    uint8_t  cfg;        /* LBJ_CFG index                          */
+    bool     lsb;        /* FIFO words are LSB-first (rev16 them)  */
+    uint8_t  txState;    /* 0 idle, 1 sending, 2 sent, 3 denied    */
     uint16_t txTick;
 } g;
+
+/* RX tuning table.  The real LBJ signal does not decode with the AirCopy
+ * values, so UP/DOWN cycles these on air.  REG_72 (1200 baud), REG_5A/5B
+ * (POCSAG sync), REG_5D (64-byte payload) and REG_5E stay fixed. */
+typedef struct {
+    uint16_t reg58;
+    uint16_t reg5c;
+    uint16_t reg70;
+} lbj_cfg_t;
+
+static const lbj_cfg_t LBJ_CFG[] = {
+    { 0x00C1u, 0xAA30u, 0x00E0u },   /* 0: current AirCopy values      */
+    { 0x00C1u, 0x5625u, 0x00E0u },   /* 1: TDCS real-signal clock rec. */
+    { 0x37C3u, 0xAA30u, 0x00E0u },   /* 2: Roger MDC RX, gain 11       */
+    { 0x37C3u, 0x5625u, 0x00E0u },   /* 3: combination                 */
+    { 0x00C3u, 0x5625u, 0x00E0u },   /* 4: RX mode variant             */
+    { 0x00C1u, 0x5665u, 0x00E0u },   /* 5: CRC on, other clock rec.    */
+    { 0x00C1u, 0x5625u, 0x00C3u },   /* 6: FSK level variant           */
+};
+
+#define LBJ_CFG_COUNT ((uint8_t)(sizeof(LBJ_CFG) / sizeof(LBJ_CFG[0])))
 
 /* ---- small formatting helpers ------------------------------------------ */
 
@@ -94,6 +117,25 @@ static char *puthex4(char *o, uint16_t v)
     *o++ = h[(v >>  4) & 0x0Fu];
     *o++ = h[ v        & 0x0Fu];
     return o;
+}
+
+static char *puthex2(char *o, uint8_t v)
+{
+    static const char h[] = "0123456789ABCDEF";
+
+    *o++ = h[(v >> 4) & 0x0Fu];
+    *o++ = h[ v       & 0x0Fu];
+    return o;
+}
+
+/* Some BK4819 parts shift each FIFO word out LSB first.  rev16 turns the
+ * received word back into the MSB-first air order POCSAG uses. */
+static uint16_t rev16(uint16_t v)
+{
+    v = (uint16_t)(((v & 0x5555u) << 1) | ((v >> 1) & 0x5555u));
+    v = (uint16_t)(((v & 0x3333u) << 2) | ((v >> 2) & 0x3333u));
+    v = (uint16_t)(((v & 0x0F0Fu) << 4) | ((v >> 4) & 0x0F0Fu));
+    return (uint16_t)((v << 8) | (v >> 8));
 }
 
 static char *putfreq(char *o, uint32_t f)
@@ -134,15 +176,17 @@ static void lbj_start(void)
 
     memset(&g.rx, 0, sizeof(g.rx));
 
+    const lbj_cfg_t *c = &LBJ_CFG[g.cfg % LBJ_CFG_COUNT];
+
     BK4819_ResetFSK();
 
     /* Direct FSK 1.2K, 1200 baud, POCSAG sync, no CRC, 64-byte payload. */
-    BK4819_WriteRegister(BK4819_REG_70, 0x00E0u);   /* tone2 on, gain 48     */
+    BK4819_WriteRegister(BK4819_REG_70, c->reg70);
     BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* tone2 1200 baud       */
-    BK4819_WriteRegister(BK4819_REG_58, 0x00C1u);   /* FSK 1.2K RX           */
+    BK4819_WriteRegister(BK4819_REG_58, c->reg58);
     BK4819_WriteRegister(BK4819_REG_5A, 0x7CD2u);   /* POCSAG sync 7CD215D8  */
     BK4819_WriteRegister(BK4819_REG_5B, 0x15D8u);
-    BK4819_WriteRegister(BK4819_REG_5C, 0xAA30u);   /* no CRC                */
+    BK4819_WriteRegister(BK4819_REG_5C, c->reg5c);
     BK4819_WriteRegister(BK4819_REG_5D, 0x3F00u);   /* 64 bytes = 16 words   */
     BK4819_WriteRegister(BK4819_REG_5E, 0x0201u);   /* FIFO threshold 1 word */
 
@@ -320,17 +364,38 @@ static void lbj_tx_send(void)
 
 bool LBJ_HandleKey(uint8_t key, bool pressed, bool held)
 {
+    if (!LBJ_ScreenActive())
+        return false;
+
+    if (key == KEY_PTT) {
 #ifdef ENABLE_LBJ_TX
-    if (key == KEY_PTT && LBJ_RxVfoIsLbj()) {
         if (pressed && !held)
             lbj_tx_send();
+#endif
+        return true;      /* receive-only build: swallow PTT */
+    }
+
+    if (!pressed || held)
+        return false;
+
+    if (key == KEY_UP || key == KEY_DOWN) {
+        if (key == KEY_UP)
+            g.cfg = (uint8_t)((g.cfg + LBJ_CFG_COUNT - 1u) % LBJ_CFG_COUNT);
+        else
+            g.cfg = (uint8_t)((g.cfg + 1u) % LBJ_CFG_COUNT);
+        LBJ_StopSampler();
+        memset(&g.rx, 0, sizeof(g.rx));
+        g.dirty = true;
         return true;
     }
-#else
-    (void)key;
-    (void)pressed;
-    (void)held;
-#endif
+
+    if (key == KEY_STAR) {
+        g.lsb = !g.lsb;
+        memset(&g.rx, 0, sizeof(g.rx));
+        g.dirty = true;
+        return true;
+    }
+
     return false;
 }
 
@@ -369,8 +434,9 @@ void LBJ_HandleInterrupts(uint16_t bits)
         lbj_process(&g.rx);
 
         for (uint8_t n = 0; n + 1u < LBJ_BATCH_WORDS; n = (uint8_t)(n + 2u)) {
-            const uint32_t cw =
-                ((uint32_t)g.raw[n] << 16) | (uint32_t)g.raw[n + 1u];
+            const uint16_t w0 = g.lsb ? rev16(g.raw[n]) : g.raw[n];
+            const uint16_t w1 = g.lsb ? rev16(g.raw[n + 1u]) : g.raw[n + 1u];
+            const uint32_t cw = ((uint32_t)w0 << 16) | (uint32_t)w1;
 
             for (int b = 31; b >= 0; b--)
                 lbj_rx_bit(&g.rx, (uint8_t)((cw >> b) & 1u));
@@ -506,12 +572,16 @@ void LBJ_Draw(void)
         UI_PrintStringSmallNormal("WAIT POCSAG...", 0, 0, 4);
     }
 
-    if (g.txState == 1u)
-        UI_PrintStringSmallNormal("TX...", 0, 0, 6);
-    else if (g.txState == 2u)
-        UI_PrintStringSmallNormal("TX SENT", 0, 0, 6);
-    else if (g.txState == 3u)
-        UI_PrintStringSmallNormal("TX DENIED", 0, 0, 6);
+    o = s;
+    o = put(o, "C");
+    o = putu(o, g.cfg);
+    o = put(o, " 58=");
+    o = puthex4(o, LBJ_CFG[g.cfg % LBJ_CFG_COUNT].reg58);
+    o = put(o, " 5C=");
+    o = puthex2(o, (uint8_t)LBJ_CFG[g.cfg % LBJ_CFG_COUNT].reg5c);
+    o = put(o, g.lsb ? " L" : " M");
+    *o = '\0';
+    UI_PrintStringSmallNormal(s, 0, 0, 6);
 
     ST7565_BlitStatusLine();
     ST7565_BlitFullScreen();

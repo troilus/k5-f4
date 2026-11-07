@@ -65,7 +65,7 @@ ENABLE_REGA	                	?= 0
 ENABLE_TDCS                   	?= 1
 ENABLE_TDCS_TX                	?= 0
 ENABLE_LBJ                    	?= 0
-ENABLE_LBJ_TX                 	?= 1
+ENABLE_LBJ_TX                 	?= 0
 
 
 # ---- DEBUGGING ----
