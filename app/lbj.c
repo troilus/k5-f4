@@ -59,7 +59,7 @@ static struct {
     uint32_t addr;
     uint32_t lastFreq;
     uint8_t  cfg;        /* LBJ_CFG index                          */
-    bool     lsb;        /* FIFO words are LSB-first (rev16 them)  */
+    uint8_t  order;      /* 0 M, 1 L, 2 I, 3 J (bit 0 LSB, bit 1 inverted) */
     uint8_t  txState;    /* 0 idle, 1 sending, 2 sent, 3 denied    */
     uint16_t txTick;
 } g;
@@ -390,7 +390,7 @@ bool LBJ_HandleKey(uint8_t key, bool pressed, bool held)
     }
 
     if (key == KEY_STAR) {
-        g.lsb = !g.lsb;
+        g.order = (uint8_t)((g.order + 1u) & 3u);
         memset(&g.rx, 0, sizeof(g.rx));
         g.dirty = true;
         return true;
@@ -423,19 +423,25 @@ void LBJ_HandleInterrupts(uint16_t bits)
         while (g.fill < LBJ_BATCH_WORDS)
             g.raw[g.fill++] = BK4819_ReadRegister(BK4819_REG_5F);
 
+        const bool lsb = (g.order & 1u) != 0u;
+        const bool inv = (g.order & 2u) != 0u;
+
         /* Every batch starts with its own sync: reset the decoder so a
          * previous frame's half-finished state cannot leak into this one. */
         memset(&g.rx, 0, sizeof(g.rx));
 
-        /* Prepend the POCSAG sync.  If the engine's FIFO starts with the
-         * sync as well, the decoder simply re-syncs on the real one. */
+        /* Prepend the POCSAG sync.  For an inverted signal, prepend the
+         * inverted sync: lbj_dec then sets pol=0 and inverts every queued
+         * codeword back to normal.  (Prepending the normal sync would pin
+         * the decoder to pol=1 and make inverted signals undecodable.) */
+        const uint32_t sync = inv ? ~POCSAG_SYNC : POCSAG_SYNC;
         for (int b = 31; b >= 0; b--)
-            lbj_rx_bit(&g.rx, (uint8_t)((POCSAG_SYNC >> b) & 1u));
+            lbj_rx_bit(&g.rx, (uint8_t)((sync >> b) & 1u));
         lbj_process(&g.rx);
 
         for (uint8_t n = 0; n + 1u < LBJ_BATCH_WORDS; n = (uint8_t)(n + 2u)) {
-            const uint16_t w0 = g.lsb ? rev16(g.raw[n]) : g.raw[n];
-            const uint16_t w1 = g.lsb ? rev16(g.raw[n + 1u]) : g.raw[n + 1u];
+            const uint16_t w0 = lsb ? rev16(g.raw[n]) : g.raw[n];
+            const uint16_t w1 = lsb ? rev16(g.raw[n + 1u]) : g.raw[n + 1u];
             const uint32_t cw = ((uint32_t)w0 << 16) | (uint32_t)w1;
 
             for (int b = 31; b >= 0; b--)
@@ -579,7 +585,9 @@ void LBJ_Draw(void)
     o = puthex4(o, LBJ_CFG[g.cfg % LBJ_CFG_COUNT].reg58);
     o = put(o, " 5C=");
     o = puthex2(o, (uint8_t)LBJ_CFG[g.cfg % LBJ_CFG_COUNT].reg5c);
-    o = put(o, g.lsb ? " L" : " M");
+    static const char ORDER_CHAR[] = "MLIJ";
+    *o++ = ' ';
+    *o++ = ORDER_CHAR[g.order & 3u];
     *o = '\0';
     UI_PrintStringSmallNormal(s, 0, 0, 6);
 
