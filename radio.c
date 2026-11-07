@@ -1030,8 +1030,9 @@ void RADIO_SetModulation(ModulationMode_t modulation)
 #endif
 #ifdef ENABLE_LBJ
         case MODULATION_LBJ:
-            /* BYP audio profile: no de-emphasis/HPF, the POCSAG NRZ needs it. */
-            mod = BK4819_AF_UNKNOWN3;
+            /* K1 LBJRadio's RAW profile: normal FM AF path, but the RX
+             * HPF/LPF/de-emphasis are disabled below. */
+            mod = BK4819_AF_FM;
             break;
 #endif
     }
@@ -1040,6 +1041,22 @@ void RADIO_SetModulation(ModulationMode_t modulation)
 
     BK4819_SetRegValue(afDacGainRegSpec, 0xF);
     BK4819_WriteRegister(BK4819_REG_3D, modulation == MODULATION_USB ? 0 : 0x2AAB);
+#ifdef ENABLE_LBJ
+    if (modulation == MODULATION_LBJ) {
+        /* REG_2B bit10 HPF300, bit9 LPF3K, bit8 de-emphasis: off.  The
+         * POCSAG NRZ cannot survive the FM audio chain. */
+        uint16_t reg2b = BK4819_ReadRegister(BK4819_REG_2B);
+        reg2b |= (1u << 10) | (1u << 9) | (1u << 8);
+        reg2b &= ~((1u << 2) | (1u << 1) | (1u << 0));
+        BK4819_WriteRegister(BK4819_REG_2B, reg2b);
+    } else if (modulation == MODULATION_FM ||
+               modulation == MODULATION_AM ||
+               modulation == MODULATION_USB) {
+        uint16_t reg2b = BK4819_ReadRegister(BK4819_REG_2B);
+        reg2b &= ~((1u << 10) | (1u << 9) | (1u << 8));
+        BK4819_WriteRegister(BK4819_REG_2B, reg2b);
+    }
+#endif
 #if defined(ENABLE_TDCS) || defined(ENABLE_LBJ)
     /* The FSK engine needs AFC to follow the carrier offset, exactly as the
      * APRS receiver does on a normal FM VFO. */
@@ -1050,7 +1067,7 @@ void RADIO_SetModulation(ModulationMode_t modulation)
 #endif
 #ifdef ENABLE_LBJ
     if (modulation == MODULATION_LBJ)
-        afcOff = false;
+        afcOff = true;      /* K1 LBJRadio RAW profile keeps AFC off */
 #endif
     BK4819_SetRegValue(afcDisableRegSpec, afcOff);
 #else

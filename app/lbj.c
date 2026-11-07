@@ -54,8 +54,11 @@ static struct {
     uint16_t status;
     uint16_t lastIrq;
     uint16_t frames;
-    char     bcd[72];
+    char     bcd[72];        /* last report of any address             */
     uint8_t  bcdLen;
+    char     bcdShort[72];   /* last 1233999/1234000 short block       */
+    uint8_t  bcdShortLen;
+    uint32_t shortAddr;      /* address of that short block, 0 = none  */
     uint32_t addr;
     uint32_t lastFreq;
     uint8_t  cfg;        /* LBJ_CFG index                          */
@@ -138,19 +141,6 @@ static uint16_t rev16(uint16_t v)
     return (uint16_t)((v << 8) | (v >> 8));
 }
 
-static char *putfreq(char *o, uint32_t f)
-{
-    /* f is in 10 Hz units: 40000000 -> 400.0000 */
-    o = putu(o, f / 100000u);
-    *o++ = '.';
-    const uint32_t r = f % 100000u;
-    *o++ = (char)('0' + (r / 10000u) % 10u);
-    *o++ = (char)('0' + (r /  1000u) % 10u);
-    *o++ = (char)('0' + (r /   100u) % 10u);
-    *o++ = (char)('0' + (r /    10u) % 10u);
-    return o;
-}
-
 /* ---- FSK engine -------------------------------------------------------- */
 
 static void lbj_fsk_rearm(void)
@@ -196,6 +186,14 @@ static void lbj_start(void)
     BK4819_WriteRegister(BK4819_REG_43, 0x3628u);
     BK4819_WriteRegister(BK4819_REG_3D, 0x2AABu);
 
+    /* K1 LBJ RAW profile: the FM audio chain's 300 Hz HPF, 3 kHz LPF and
+     * de-emphasis destroy the POCSAG NRZ before the slicer sees it.  The K1
+     * LBJRadio disables exactly these three RX filter bits. */
+    uint16_t reg2b = BK4819_ReadRegister(BK4819_REG_2B);
+    reg2b |= (1u << 10) | (1u << 9) | (1u << 8);
+    reg2b &= ~((1u << 2) | (1u << 1) | (1u << 0));
+    BK4819_WriteRegister(BK4819_REG_2B, reg2b);
+
     const uint16_t mask = BK4819_ReadRegister(BK4819_REG_3F);
     BK4819_WriteRegister(BK4819_REG_3F, (uint16_t)(mask | LBJ_IRQ_MASK));
 
@@ -233,6 +231,18 @@ void lbj_emit_msg(const lbj_rx_t *r, const char *bcd, uint16_t len)
     g.bcd[n] = '\0';
     g.bcdLen = (uint8_t)n;
     g.addr   = r->addr;
+
+    /* A train sends the 15-char short block (1233999/1234000) followed by a
+     * 30..65-char detail block (1234001/1234002).  Keep the short block in
+     * its own buffer so the detail page cannot overwrite the train number /
+     * speed / km readout with '?' when only the detail block fails. */
+    if (r->addr == 1233999u || r->addr == 1234000u) {
+        memcpy(g.bcdShort, bcd, n);
+        g.bcdShort[n] = '\0';
+        g.bcdShortLen = (uint8_t)n;
+        g.shortAddr   = r->addr;
+    }
+
     g.dirty  = true;
 }
 
@@ -528,8 +538,11 @@ void LBJ_Draw(void)
     UI_DisplayClear();
 
     o = s;
-    o = put(o, "LBJ ");
-    o = putfreq(o, gRxVfo->pRX->Frequency);
+    o = put(o, "A");
+    if (g.shortAddr)
+        o = putu(o, g.shortAddr);
+    else
+        o = put(o, "-------");
     o = put(o, " F");
     o = putu(o, g.frames);
     *o = '\0';
@@ -558,24 +571,27 @@ void LBJ_Draw(void)
         UI_PrintStringSmallNormal(s, 0, 0, (uint8_t)(2u + row));
     }
 
-    if (g.bcdLen) {
-        char line[20];
-        uint8_t n = (g.bcdLen > 18u) ? 18u : g.bcdLen;
+    const char *bcd  = g.bcdShortLen ? g.bcdShort : g.bcd;
+    const uint8_t blen = g.bcdShortLen ? g.bcdShortLen : g.bcdLen;
 
-        memcpy(line, g.bcd, n);
+    if (blen) {
+        char line[20];
+        uint8_t n = (blen > 18u) ? 18u : blen;
+
+        memcpy(line, bcd, n);
         line[n] = '\0';
         UI_PrintStringSmallNormal(line, 0, 0, 4);
 
-        if (g.bcdLen > 18u) {
-            n = (uint8_t)(g.bcdLen - 18u);
+        if (blen > 18u) {
+            n = (uint8_t)(blen - 18u);
             if (n > 18u)
                 n = 18u;
-            memcpy(line, g.bcd + 18u, n);
+            memcpy(line, bcd + 18u, n);
             line[n] = '\0';
             UI_PrintStringSmallNormal(line, 0, 0, 5);
         }
     } else {
-        UI_PrintStringSmallNormal("WAIT POCSAG...", 0, 0, 4);
+        UI_PrintStringSmallNormal("WAIT SHORT...", 0, 0, 4);
     }
 
     o = s;
