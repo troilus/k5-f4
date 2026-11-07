@@ -37,6 +37,9 @@
 #include "app/main.h"
 #include "app/menu.h"
 #include "app/scanner.h"
+#ifdef ENABLE_TDCS
+    #include "app/tdcs.h"
+#endif
 #ifdef ENABLE_UART
     #include "app/uart.h"
 #endif
@@ -819,6 +822,12 @@ static void CheckRadioInterrupts(void)
             AIRCOPY_StorePacket();
         }
 #endif
+#ifdef ENABLE_TDCS
+        /* The FSK engine shares REG_02/REG_5F with the radio's own interrupt
+         * handling; hand the already-read bits over instead of reading (and
+         * clearing) REG_02 a second time here. */
+        TDCS_HandleInterrupts(interrupts.__raw);
+#endif
     }
 }
 
@@ -1396,6 +1405,13 @@ void APP_TimeSlice10ms(void)
 
     if (gCurrentFunction != FUNCTION_POWER_SAVE || !gRxIdleMode)
         CheckRadioInterrupts();
+
+#ifdef ENABLE_TDCS
+    /* Ages reports, services the LED, starts/stops the FSK engine and repaints
+     * the decode window.  Must run after CheckRadioInterrupts() so a re-arm
+     * cannot clear a FIFO that still holds this tick's data. */
+    TDCS_Tick();
+#endif
 
     if (gCurrentFunction == FUNCTION_TRANSMIT)
     {   // transmitting
@@ -2044,6 +2060,13 @@ static void ProcessKey(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld)
         gWasFKeyPressed = false;
         gUpdateStatus   = true;
     }
+
+#ifdef ENABLE_TDCS
+    /* The TDCS window owns every key while it is up.  PTT closes it and is
+     * left to the normal transmit path (TDCS itself is receive-only). */
+    if (TDCS_HandleKey((uint8_t)Key, bKeyPressed, bKeyHeld))
+        goto Skip;
+#endif
 
     if (bFlag) {
         goto Skip;

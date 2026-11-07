@@ -16,6 +16,7 @@
 
 #include <string.h>
 
+#include "app/cn_font.h"
 #include "driver/st7565.h"
 #include "external/printf/printf.h"
 #include "font.h"
@@ -115,6 +116,49 @@ void UI_PrintStringSmallNormal(const char *pString, uint8_t Start, uint8_t End, 
 {
     UI_PrintStringSmall(pString, Start, End, Line, ARRAY_SIZE(gFontSmall[0]), (const uint8_t *)gFontSmall);
 }
+
+#ifdef ENABLE_TDCS
+/* Mixed ASCII/GB2312 small-font row, ported from the UV-K1 LBJRadio
+ * ENABLE_CN_FONT_EMBED build.  A Chinese glyph is 8x8 and advances 9 px
+ * (8 px glyph + 1 px gap); ASCII keeps the 6 px font at its normal 7 px
+ * pitch.  The string is GB2312 in the binary (-fexec-charset=GB2312). */
+uint8_t UI_PrintStringSmallCN(const char *pString, uint8_t Start, uint8_t Line)
+{
+    const size_t Length = strlen(pString);
+    uint8_t x = Start;
+
+    for (size_t i = 0; i < Length; i++) {
+        const uint8_t c = (uint8_t)pString[i];
+
+        if (c >= 0xA1u && c <= 0xF7u && (i + 1u) < Length) {
+            const uint8_t lo = (uint8_t)pString[i + 1u];
+            if (lo >= 0xA1u && lo <= 0xFEu) {
+                if ((unsigned)x + 9u > LCD_WIDTH)
+                    break;
+                const uint8_t *glyph =
+                    CN_FONT_Glyph8((uint16_t)(((uint16_t)c << 8) | lo));
+                if (glyph)
+                    memcpy(gFrameBuffer[Line] + x + 1u, glyph, CN_FONT_GLYPH8);
+                x = (uint8_t)(x + 9u);
+                i++;
+                continue;
+            }
+        }
+
+        if (c > ' ' && c < 127u) {
+            if ((unsigned)x + 6u > LCD_WIDTH)
+                break;
+            const unsigned int index = c - ' ' - 1u;
+            memcpy(gFrameBuffer[Line] + x, &gFontSmall[index][0], 6u);
+            x = (uint8_t)(x + 7u);
+        } else if (c == ' ') {
+            x = (uint8_t)(x + 7u);
+        }
+    }
+
+    return x;
+}
+#endif
 
 void UI_PrintStringSmallBold(const char *pString, uint8_t Start, uint8_t End, uint8_t Line)
 {

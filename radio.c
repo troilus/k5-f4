@@ -19,6 +19,9 @@
 
 #include "am_fix.h"
 #include "app/dtmf.h"
+#ifdef ENABLE_TDCS
+    #include "app/tdcs.h"
+#endif
 #ifdef ENABLE_FMRADIO
     #include "app/fm.h"
 #endif
@@ -50,7 +53,10 @@ const char gModulationStr[MODULATION_UKNOWN][4] = {
 
 #ifdef ENABLE_BYP_RAW_DEMODULATORS
     [MODULATION_BYP]="BYP",
-    [MODULATION_RAW]="RAW"
+    [MODULATION_RAW]="RAW",
+#endif
+#ifdef ENABLE_TDCS
+    [MODULATION_TDCS]="TDC",
 #endif
 };
 
@@ -992,6 +998,12 @@ void RADIO_SetTxParameters(void)
 
 void RADIO_SetModulation(ModulationMode_t modulation)
 {
+#ifdef ENABLE_TDCS
+    /* The FSK engine owns REG_58/59/5A..5E; stop it before reconfiguring the
+     * receiver so its interrupt mask and FIFO are restored while current. */
+    TDCS_StopSampler();
+#endif
+
     BK4819_AF_Type_t mod;
     switch(modulation) {
         default:
@@ -1019,7 +1031,14 @@ void RADIO_SetModulation(ModulationMode_t modulation)
 
     BK4819_SetRegValue(afDacGainRegSpec, 0xF);
     BK4819_WriteRegister(BK4819_REG_3D, modulation == MODULATION_USB ? 0 : 0x2AAB);
+#ifdef ENABLE_TDCS
+    /* The FSK engine needs AFC to follow the TDCS carrier offset, exactly as
+     * the APRS receiver does on a normal FM VFO. */
+    BK4819_SetRegValue(afcDisableRegSpec,
+        modulation != MODULATION_FM && modulation != MODULATION_TDCS);
+#else
     BK4819_SetRegValue(afcDisableRegSpec, modulation != MODULATION_FM);
+#endif
 
     RADIO_SetupAGC(modulation == MODULATION_AM, false);
 }
@@ -1126,6 +1145,12 @@ void RADIO_PrepareTX(void)
 #ifndef ENABLE_TX_WHEN_AM
     else if (gCurrentVfo->Modulation != MODULATION_FM) {
         // not allowed to TX if in AM mode
+        State = VFO_STATE_TX_DISABLE;
+    }
+#endif
+#ifdef ENABLE_TDCS
+    else if (gCurrentVfo->Modulation == MODULATION_TDCS) {
+        // TDCS is a receive-only mode.
         State = VFO_STATE_TX_DISABLE;
     }
 #endif

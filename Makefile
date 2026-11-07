@@ -18,7 +18,8 @@ ENABLE_DTMF_CALLING           	?= 0
 ENABLE_FLASHLIGHT             	?= 1
 
 # ---- CUSTOM MODS ----
-ENABLE_SPECTRUM               	?= 1
+# TDCS needs the flash: the spectrum analyzer is disabled to make room.
+ENABLE_SPECTRUM               	?= 0
 ENABLE_BIG_FREQ               	?= 1
 ENABLE_SMALL_BOLD             	?= 1
 ENABLE_CUSTOM_MENU_LAYOUT     	?= 1
@@ -43,7 +44,7 @@ ENABLE_BLMIN_TMP_OFF          	?= 0
 ENABLE_SCAN_RANGES            	?= 1
 ENABLE_FEAT_F4HWN             	?= 1
 ENABLE_FEAT_F4HWN_SCREENSHOT  	?= 0
-ENABLE_FEAT_F4HWN_SPECTRUM    	?= 1
+ENABLE_FEAT_F4HWN_SPECTRUM    	?= 0
 
 ENABLE_FEAT_F4HWN_RX_TX_TIMER   ?= 0
 ENABLE_FEAT_F4HWN_CHARGING_C    ?= 0
@@ -61,6 +62,8 @@ ENABLE_FEAT_F4HWN_GMRS_FRS_MURS	?= 0
 ENABLE_FEAT_F4HWN_CA         	?= 0
 ENABLE_FEAT_F4HWN_DEBUG         ?= 0
 ENABLE_REGA	                	?= 0
+ENABLE_TDCS                   	?= 1
+ENABLE_TDCS_TX                	?= 0
 
 
 # ---- DEBUGGING ----
@@ -144,6 +147,9 @@ OBJS += app/common.o
 OBJS += app/dtmf.o
 ifeq ($(ENABLE_REGA),1)
 	OBJS += app/rega.o
+endif
+ifeq ($(ENABLE_TDCS),1)
+	OBJS += app/tdcs.o app/tdcs_dec.o app/cn_font.o
 endif
 ifeq ($(ENABLE_FLASHLIGHT),1)
 	OBJS += app/flashlight.o
@@ -293,6 +299,7 @@ CFLAGS += -Wextra
 #CFLAGS += -Wpedantic
 
 CFLAGS += -DPRINTF_INCLUDE_CONFIG_H
+CFLAGS += -fexec-charset=GB2312
 CFLAGS += -DAUTHOR_STRING=\"$(AUTHOR_STRING)\" -DVERSION_STRING=\"$(VERSION_STRING)\"
 
 ifeq ($(ENABLE_SPECTRUM),1)
@@ -411,6 +418,12 @@ ifeq ($(ENABLE_DTMF_CALLING),1)
 endif
 ifeq ($(ENABLE_REGA),1)
 	CFLAGS  += -DENABLE_REGA
+endif
+ifeq ($(ENABLE_TDCS),1)
+	CFLAGS  += -DENABLE_TDCS
+endif
+ifeq ($(ENABLE_TDCS_TX),1)
+	CFLAGS  += -DENABLE_TDCS_TX
 endif
 ifeq ($(ENABLE_AGC_SHOW_DATA),1)
 	CFLAGS  += -DENABLE_AGC_SHOW_DATA

@@ -1,5 +1,7 @@
 #ifdef ENABLE_FLASHLIGHT
 
+#include <stdbool.h>
+
 #include "driver/gpio.h"
 #include "bsp/dp32g030/gpio.h"
 
