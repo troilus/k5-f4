@@ -64,6 +64,7 @@ ENABLE_FEAT_F4HWN_DEBUG         ?= 0
 ENABLE_REGA	                	?= 0
 ENABLE_TDCS                   	?= 1
 ENABLE_TDCS_TX                	?= 0
+ENABLE_LBJ                    	?= 0
 
 
 # ---- DEBUGGING ----
@@ -150,6 +151,9 @@ ifeq ($(ENABLE_REGA),1)
 endif
 ifeq ($(ENABLE_TDCS),1)
 	OBJS += app/tdcs.o app/tdcs_dec.o app/cn_font.o
+endif
+ifeq ($(ENABLE_LBJ),1)
+	OBJS += app/lbj.o app/lbj_dec.o
 endif
 ifeq ($(ENABLE_FLASHLIGHT),1)
 	OBJS += app/flashlight.o
@@ -421,6 +425,9 @@ ifeq ($(ENABLE_TDCS),1)
 endif
 ifeq ($(ENABLE_TDCS_TX),1)
 	CFLAGS  += -DENABLE_TDCS_TX
+endif
+ifeq ($(ENABLE_LBJ),1)
+	CFLAGS  += -DENABLE_LBJ
 endif
 ifeq ($(ENABLE_AGC_SHOW_DATA),1)
 	CFLAGS  += -DENABLE_AGC_SHOW_DATA

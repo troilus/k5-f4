@@ -58,6 +58,9 @@ const char gModulationStr[MODULATION_UKNOWN][4] = {
 #ifdef ENABLE_TDCS
     [MODULATION_TDCS]="TDC",
 #endif
+#ifdef ENABLE_LBJ
+    [MODULATION_LBJ]="LBJ",
+#endif
 };
 
 bool RADIO_CheckValidChannel(uint16_t channel, bool checkScanList, uint8_t scanList)
@@ -1025,17 +1028,31 @@ void RADIO_SetModulation(ModulationMode_t modulation)
             mod = BK4819_AF_BASEBAND1;
             break;
 #endif
+#ifdef ENABLE_LBJ
+        case MODULATION_LBJ:
+            /* BYP audio profile: no de-emphasis/HPF, the POCSAG NRZ needs it. */
+            mod = BK4819_AF_UNKNOWN3;
+            break;
+#endif
     }
 
     BK4819_SetAF(mod);
 
     BK4819_SetRegValue(afDacGainRegSpec, 0xF);
     BK4819_WriteRegister(BK4819_REG_3D, modulation == MODULATION_USB ? 0 : 0x2AAB);
+#if defined(ENABLE_TDCS) || defined(ENABLE_LBJ)
+    /* The FSK engine needs AFC to follow the carrier offset, exactly as the
+     * APRS receiver does on a normal FM VFO. */
+    bool afcOff = (modulation != MODULATION_FM);
 #ifdef ENABLE_TDCS
-    /* The FSK engine needs AFC to follow the TDCS carrier offset, exactly as
-     * the APRS receiver does on a normal FM VFO. */
-    BK4819_SetRegValue(afcDisableRegSpec,
-        modulation != MODULATION_FM && modulation != MODULATION_TDCS);
+    if (modulation == MODULATION_TDCS)
+        afcOff = false;
+#endif
+#ifdef ENABLE_LBJ
+    if (modulation == MODULATION_LBJ)
+        afcOff = false;
+#endif
+    BK4819_SetRegValue(afcDisableRegSpec, afcOff);
 #else
     BK4819_SetRegValue(afcDisableRegSpec, modulation != MODULATION_FM);
 #endif
@@ -1151,6 +1168,12 @@ void RADIO_PrepareTX(void)
 #ifdef ENABLE_TDCS
     else if (gCurrentVfo->Modulation == MODULATION_TDCS) {
         // TDCS is a receive-only mode.
+        State = VFO_STATE_TX_DISABLE;
+    }
+#endif
+#ifdef ENABLE_LBJ
+    else if (gCurrentVfo->Modulation == MODULATION_LBJ) {
+        // LBJ is a receive-only mode.
         State = VFO_STATE_TX_DISABLE;
     }
 #endif

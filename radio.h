@@ -68,6 +68,9 @@ typedef enum {
 #ifdef ENABLE_TDCS
     MODULATION_TDCS,         /* receive-only: 450 MHz TDCS / FFSK decode */
 #endif
+#ifdef ENABLE_LBJ
+    MODULATION_LBJ,          /* receive-only: LBJ / POCSAG decode */
+#endif
 
     MODULATION_UKNOWN
 } ModulationMode_t;

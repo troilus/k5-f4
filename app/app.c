@@ -40,6 +40,9 @@
 #ifdef ENABLE_TDCS
     #include "app/tdcs.h"
 #endif
+#ifdef ENABLE_LBJ
+    #include "app/lbj.h"
+#endif
 #ifdef ENABLE_UART
     #include "app/uart.h"
 #endif
@@ -828,6 +831,9 @@ static void CheckRadioInterrupts(void)
          * clearing) REG_02 a second time here. */
         TDCS_HandleInterrupts(interrupts.__raw);
 #endif
+#ifdef ENABLE_LBJ
+        LBJ_HandleInterrupts(interrupts.__raw);
+#endif
     }
 }
 
@@ -1411,6 +1417,9 @@ void APP_TimeSlice10ms(void)
      * the decode window.  Must run after CheckRadioInterrupts() so a re-arm
      * cannot clear a FIFO that still holds this tick's data. */
     TDCS_Tick();
+#endif
+#ifdef ENABLE_LBJ
+    LBJ_Tick();
 #endif
 
     if (gCurrentFunction == FUNCTION_TRANSMIT)

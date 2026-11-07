@@ -1,0 +1,331 @@
+/* LBJ / POCSAG receive for the classic UV-K5 - see lbj.h.
+ *
+ * The K1 LBJRadio samples the BK4819 AF output on PA4 at 19.2 kHz.  The
+ * classic UV-K5 has no audio-to-ADC path, so this port uses the BK4819 FSK
+ * engine in direct-FSK 1.2K mode (the AirCopy engine) and feeds the FIFO
+ * codewords to the K1 POCSAG decoder (lbj_dec.c).
+ *
+ * This is the first, diagnostic build: it prints the raw FIFO words and the
+ * decoded BCD string, so the bit order and the sync can be checked on air
+ * before the report parser and the Chinese popup are added.
+ */
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "lbj.h"
+#include "lbj_dec.h"
+
+#include "driver/bk4819.h"
+#include "driver/st7565.h"
+#include "functions.h"
+#include "misc.h"
+#include "radio.h"
+#include "settings.h"
+#include "ui/helper.h"
+#include "ui/main.h"
+#include "ui/ui.h"
+
+/* BK4819 interrupt bits (REG_02 / REG_3F). */
+#define LBJ_IRQ_SYNC   0x0002u
+#define LBJ_IRQ_FIFO   0x1000u
+#define LBJ_IRQ_DONE   0x2000u
+#define LBJ_IRQ_MASK   (LBJ_IRQ_SYNC | LBJ_IRQ_FIFO | LBJ_IRQ_DONE)
+
+/* POCSAG batch: 4-byte sync + 16 codewords = 68 bytes = 34 16-bit FIFO words. */
+#define LBJ_BATCH_WORDS  34u
+
+#define POCSAG_SYNC      0x7CD215D8u
+
+static struct {
+    bool     on;
+    bool     dirty;
+    uint16_t sec, subSec;
+    lbj_rx_t rx;
+    uint16_t raw[LBJ_BATCH_WORDS];
+    uint8_t  rawCount;   /* words shown on screen (last completed batch) */
+    uint8_t  fill;       /* words collected for the batch in progress     */
+    uint16_t status;
+    uint16_t lastIrq;
+    uint16_t frames;
+    char     bcd[72];
+    uint8_t  bcdLen;
+    uint32_t addr;
+    uint32_t lastFreq;
+} g;
+
+/* ---- small formatting helpers ------------------------------------------ */
+
+static char *put(char *o, const char *s)
+{
+    while (*s)
+        *o++ = *s++;
+    return o;
+}
+
+static char *putu(char *o, uint32_t v)
+{
+    char tmp[10];
+    uint8_t n = 0;
+
+    do {
+        tmp[n++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    } while (v);
+    while (n)
+        *o++ = tmp[--n];
+    return o;
+}
+
+static char *puthex4(char *o, uint16_t v)
+{
+    static const char h[] = "0123456789ABCDEF";
+
+    *o++ = h[(v >> 12) & 0x0Fu];
+    *o++ = h[(v >>  8) & 0x0Fu];
+    *o++ = h[(v >>  4) & 0x0Fu];
+    *o++ = h[ v        & 0x0Fu];
+    return o;
+}
+
+static char *putfreq(char *o, uint32_t f)
+{
+    /* f is in 10 Hz units: 40000000 -> 400.0000 */
+    o = putu(o, f / 100000u);
+    *o++ = '.';
+    const uint32_t r = f % 100000u;
+    *o++ = (char)('0' + (r / 10000u) % 10u);
+    *o++ = (char)('0' + (r /  1000u) % 10u);
+    *o++ = (char)('0' + (r /   100u) % 10u);
+    *o++ = (char)('0' + (r /    10u) % 10u);
+    return o;
+}
+
+/* ---- FSK engine -------------------------------------------------------- */
+
+static void lbj_fsk_arm(void)
+{
+    /* Re-arm without the 30 ms BK4819_ResetFSK() delay: clear REG_02, clear
+     * the RX FIFO and enable FSK RX again. */
+    BK4819_WriteRegister(BK4819_REG_02, 0x0000u);
+    BK4819_WriteRegister(BK4819_REG_59, 0x4068u);
+    BK4819_WriteRegister(BK4819_REG_59, 0x3068u);
+}
+
+static void lbj_start(void)
+{
+    if (g.on)
+        return;
+
+    memset(&g.rx, 0, sizeof(g.rx));
+
+    BK4819_ResetFSK();
+
+    /* Direct FSK 1.2K, 1200 baud, POCSAG sync, no CRC, 68-byte batch. */
+    BK4819_WriteRegister(BK4819_REG_70, 0x00E0u);   /* tone2 on, gain 48     */
+    BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* tone2 1200 baud       */
+    BK4819_WriteRegister(BK4819_REG_58, 0x00C1u);   /* FSK 1.2K RX           */
+    BK4819_WriteRegister(BK4819_REG_5A, 0x7CD2u);   /* POCSAG sync 7CD215D8  */
+    BK4819_WriteRegister(BK4819_REG_5B, 0x15D8u);
+    BK4819_WriteRegister(BK4819_REG_5C, 0xAA30u);   /* no CRC                */
+    BK4819_WriteRegister(BK4819_REG_5D, 0x4300u);   /* 68 bytes              */
+    BK4819_WriteRegister(BK4819_REG_5E, 0x0201u);   /* FIFO threshold 1 word */
+
+    BK4819_PrepareFSKReceive();
+
+    /* 25 kHz IF and the wide weak-signal filter, as in the BYP/RAW mode. */
+    BK4819_WriteRegister(BK4819_REG_43, 0x3628u);
+    BK4819_WriteRegister(BK4819_REG_3D, 0x2AABu);
+
+    const uint16_t mask = BK4819_ReadRegister(BK4819_REG_3F);
+    BK4819_WriteRegister(BK4819_REG_3F, (uint16_t)(mask | LBJ_IRQ_MASK));
+
+    g.on       = true;
+    g.rawCount = 0;
+    g.fill     = 0;
+    g.lastFreq = gRxVfo->pRX->Frequency;
+}
+
+void LBJ_StopSampler(void)
+{
+    if (!g.on)
+        return;
+
+    g.on = false;
+
+    BK4819_WriteRegister(BK4819_REG_59, 0x0000u);
+    BK4819_WriteRegister(BK4819_REG_58, 0x0000u);
+    BK4819_WriteRegister(BK4819_REG_70, 0x0000u);
+
+    const uint16_t mask = BK4819_ReadRegister(BK4819_REG_3F);
+    BK4819_WriteRegister(BK4819_REG_3F, (uint16_t)(mask & ~LBJ_IRQ_MASK));
+}
+
+/* ---- decoder output ---------------------------------------------------- */
+
+void lbj_emit_msg(const lbj_rx_t *r, const char *bcd, uint16_t len)
+{
+    uint16_t n = len;
+
+    if (n > (uint16_t)(sizeof(g.bcd) - 1u))
+        n = (uint16_t)(sizeof(g.bcd) - 1u);
+
+    memcpy(g.bcd, bcd, n);
+    g.bcd[n] = '\0';
+    g.bcdLen = (uint8_t)n;
+    g.addr   = r->addr;
+    g.dirty  = true;
+}
+
+/* ---- interrupts -------------------------------------------------------- */
+
+void LBJ_HandleInterrupts(uint16_t bits)
+{
+    if (!g.on)
+        return;
+
+    g.lastIrq = bits;
+
+    /* Drain the FIFO as words arrive: the engine's FIFO is much smaller than
+     * one 68-byte batch, so waiting for the finished interrupt would lose
+     * most of it.  REG_5E is programmed to a one-word threshold. */
+    if (bits & LBJ_IRQ_FIFO) {
+        const uint16_t count = BK4819_ReadRegister(BK4819_REG_5E) & 7u;
+        for (uint16_t i = 0; i < count && g.fill < LBJ_BATCH_WORDS; i++)
+            g.raw[g.fill++] = BK4819_ReadRegister(BK4819_REG_5F);
+    }
+
+    if (bits & LBJ_IRQ_DONE) {
+        g.status = BK4819_ReadRegister(BK4819_REG_0B);
+
+        while (g.fill < LBJ_BATCH_WORDS)
+            g.raw[g.fill++] = BK4819_ReadRegister(BK4819_REG_5F);
+
+        /* Prepend the POCSAG sync.  If the engine's FIFO starts with the
+         * sync as well, the decoder simply re-syncs on the real one. */
+        for (int b = 31; b >= 0; b--)
+            lbj_rx_bit(&g.rx, (uint8_t)((POCSAG_SYNC >> b) & 1u));
+        lbj_process(&g.rx);
+
+        for (uint8_t n = 0; n + 1u < LBJ_BATCH_WORDS; n = (uint8_t)(n + 2u)) {
+            const uint32_t cw =
+                ((uint32_t)g.raw[n] << 16) | (uint32_t)g.raw[n + 1u];
+
+            for (int b = 31; b >= 0; b--)
+                lbj_rx_bit(&g.rx, (uint8_t)((cw >> b) & 1u));
+            lbj_process(&g.rx);
+        }
+
+        g.rawCount = LBJ_BATCH_WORDS;
+        g.fill     = 0;
+        g.frames++;
+
+        lbj_fsk_arm();
+        g.dirty = true;
+    }
+}
+
+/* ---- tick -------------------------------------------------------------- */
+
+bool LBJ_RxVfoIsLbj(void)
+{
+    return gRxVfo && gRxVfo->Modulation == MODULATION_LBJ;
+}
+
+bool LBJ_ScreenActive(void)
+{
+    return gScreenToDisplay == DISPLAY_MAIN && LBJ_RxVfoIsLbj();
+}
+
+void LBJ_Tick(void)
+{
+    if (++g.subSec >= 100u) {
+        g.subSec = 0u;
+        g.sec++;
+    }
+
+    if (gCurrentFunction == FUNCTION_TRANSMIT || gPttIsPressed) {
+        LBJ_StopSampler();
+        return;
+    }
+    if (!LBJ_RxVfoIsLbj()) {
+        LBJ_StopSampler();
+        return;
+    }
+
+    /* A retune resets REG_43/REG_3D; restart the FSK engine so the 25 kHz
+     * filter and the batch setup are applied again. */
+    if (g.on && g.lastFreq != gRxVfo->pRX->Frequency) {
+        LBJ_StopSampler();
+    }
+
+    if (!g.on)
+        lbj_start();
+
+    if (g.dirty) {
+        g.dirty      = false;
+        gUpdateDisplay = true;
+    }
+}
+
+/* ---- screen ------------------------------------------------------------ */
+
+void LBJ_Draw(void)
+{
+    char s[40];
+    char *o;
+
+    UI_DisplayClear();
+
+    o = s;
+    o = put(o, "LBJ ");
+    o = putfreq(o, gRxVfo->pRX->Frequency);
+    o = put(o, " F");
+    o = putu(o, g.frames);
+    *o = '\0';
+    UI_PrintStringSmallNormal(s, 0, 0, 0);
+
+    o = s;
+    o = put(o, "IRQ ");
+    o = puthex4(o, g.lastIrq);
+    o = put(o, " ST ");
+    o = puthex4(o, g.status);
+    *o = '\0';
+    UI_PrintStringSmallNormal(s, 0, 0, 1);
+
+    for (uint8_t row = 0; row < 2u; row++) {
+        o = s;
+        for (uint8_t i = 0; i < 4u; i++) {
+            const uint8_t k = (uint8_t)(row * 4u + i);
+            if (k >= g.rawCount)
+                break;
+            o = puthex4(o, g.raw[k]);
+            *o++ = ' ';
+        }
+        *o = '\0';
+        UI_PrintStringSmallNormal(s, 0, 0, (uint8_t)(2u + row));
+    }
+
+    if (g.bcdLen) {
+        char line[20];
+        uint8_t n = (g.bcdLen > 18u) ? 18u : g.bcdLen;
+
+        memcpy(line, g.bcd, n);
+        line[n] = '\0';
+        UI_PrintStringSmallNormal(line, 0, 0, 4);
+
+        if (g.bcdLen > 18u) {
+            n = (uint8_t)(g.bcdLen - 18u);
+            if (n > 18u)
+                n = 18u;
+            memcpy(line, g.bcd + 18u, n);
+            line[n] = '\0';
+            UI_PrintStringSmallNormal(line, 0, 0, 5);
+        }
+    } else {
+        UI_PrintStringSmallNormal("WAIT POCSAG...", 0, 0, 4);
+    }
+
+    ST7565_BlitStatusLine();
+    ST7565_BlitFullScreen();
+}

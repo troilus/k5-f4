@@ -22,6 +22,9 @@
 #ifdef ENABLE_TDCS
     #include "app/tdcs.h"
 #endif
+#ifdef ENABLE_LBJ
+    #include "app/lbj.h"
+#endif
 #ifdef ENABLE_AM_FIX
     #include "am_fix.h"
 #endif
@@ -544,6 +547,15 @@ void UI_DisplayMain(void)
     {
         center_line = CENTER_LINE_NONE;
         TDCS_DrawPopup();
+        return;
+    }
+#endif
+#ifdef ENABLE_LBJ
+    /* The LBJ decode page owns the screen while that VFO is selected. */
+    if (LBJ_ScreenActive())
+    {
+        center_line = CENTER_LINE_NONE;
+        LBJ_Draw();
         return;
     }
 #endif
