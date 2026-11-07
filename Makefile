@@ -149,7 +149,7 @@ ifeq ($(ENABLE_REGA),1)
 	OBJS += app/rega.o
 endif
 ifeq ($(ENABLE_TDCS),1)
-	OBJS += app/tdcs.o app/tdcs_dec.o
+	OBJS += app/tdcs.o app/tdcs_dec.o app/cn_font.o
 endif
 ifeq ($(ENABLE_FLASHLIGHT),1)
 	OBJS += app/flashlight.o
@@ -296,6 +296,7 @@ CFLAGS += -Wextra
 #CFLAGS += -Wpedantic
 
 CFLAGS += -DPRINTF_INCLUDE_CONFIG_H
+CFLAGS += -fexec-charset=GB2312
 CFLAGS += -DAUTHOR_STRING=\"$(AUTHOR_STRING)\" -DVERSION_STRING=\"$(VERSION_STRING)\"
 
 ifeq ($(ENABLE_SPECTRUM),1)

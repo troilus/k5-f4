@@ -165,13 +165,13 @@ static char *putage(char *o, uint16_t sec)
 static const char *sig_name(uint8_t v)
 {
     switch (v) {
-        case 0: return "START";
-        case 1: return "YARD";
-        case 2: return "DEPART";
-        case 3: return "ARRIVE";
-        case 4: return "PASS";
-        case 5: return "ADV";
-        case 6: return "PERMIT";
+        case 0: return "始发";
+        case 1: return "调车";
+        case 2: return "发车";
+        case 3: return "到达";
+        case 4: return "通过";
+        case 5: return "预告";
+        case 6: return "许可";
         default: return NULL;
     }
 }
@@ -179,22 +179,24 @@ static const char *sig_name(uint8_t v)
 static const char *sig_type_name(uint8_t v)
 {
     switch (v) {
-        case 2: return "DEPART";
-        case 3: return "ARRIVE";
-        case 4: return "PASS";
-        case 5: return "ADV";
-        case 6: return "PERMIT";
+        case 2: return "发车";
+        case 3: return "到达";
+        case 4: return "通过";
+        case 5: return "预告";
+        case 6: return "许可";
         default: return NULL;
     }
 }
 
-/* Short labels: the 8x8 small font advances 7 px, so a six-character label
- * still leaves most of the 128 px row for the value. */
+/* Short labels: an 8x8 Chinese glyph advances 9 px, so a four-character label
+ * still leaves most of the 128 px row for the value.  Index 14/18 (STNEXT and
+ * DRVEXT) are merged into 13/17 and never drawn. */
 static const char *const TDCS_LABEL[TDCS_FIELDS] = {
-    "SIGNAL", "SIGTYP", "CREW", "CLASS", "TRAIN",
-    "LOCO", "TYPE", "LOCO#", "KM", "SPEED",
-    "WEIGHT", "LENGTH", "CARS", "STN", "STNEXT",
-    "SECT", "ROUTE", "DRIVER", "DRVEXT", "STATUS"
+    "信号机", "信号种类", "本补客货", "车次种类", "车次",
+    "机车类型", "类型扩充", "机车号", "公里标", "速度",
+    "总重", "计长", "辆数", "车站号", "",
+    "区段号", "实际交路", "司机号", "",
+    "状态"
 };
 
 /* Display order: the order in the frame is not the order an operator reads. */
@@ -207,8 +209,8 @@ static const uint8_t TDCS_PAGE_MAP[TDCS_PAGES][TDCS_ROWS] = {
 
 static void field_row(uint8_t row, const char *label, const char *value)
 {
-    UI_PrintStringSmallNormal(label, 0, 0, row);
-    UI_PrintStringSmallNormal(value, 52, 0, row);
+    UI_PrintStringSmallCN(label, 0, row);
+    UI_PrintStringSmallCN(value, 52, row);
 }
 
 static void draw_field(uint8_t row, const tdcs_rec_t *r, uint8_t idx)
@@ -222,7 +224,7 @@ static void draw_field(uint8_t row, const tdcs_rec_t *r, uint8_t idx)
             const char *n = sig_name(m->sig);
             if (!n) {
                 o = v;
-                o = put(o, "UNK ");
+                o = put(o, "未知 ");
                 o = putu(o, m->sig);
                 *o = '\0';
                 n = v;
@@ -234,7 +236,7 @@ static void draw_field(uint8_t row, const tdcs_rec_t *r, uint8_t idx)
             const char *n = sig_type_name(m->sig_type);
             if (!n) {
                 o = v;
-                o = put(o, "UNK ");
+                o = put(o, "未知 ");
                 o = putu(o, m->sig_type);
                 *o = '\0';
                 n = v;
@@ -244,7 +246,7 @@ static void draw_field(uint8_t row, const tdcs_rec_t *r, uint8_t idx)
         }
         case 2: {
             static const char *const CREW[4] = {
-                "MAIN FRT", "MAIN PAS", "HELP FRT", "HELP PAS"
+                "主货", "主客", "补货", "补客"
             };
             field_row(row, TDCS_LABEL[idx], CREW[m->crew & 3u]);
             break;
@@ -333,7 +335,7 @@ static void draw_field(uint8_t row, const tdcs_rec_t *r, uint8_t idx)
             break;
         case 13:
             o = putu(v, m->station);
-            o = put(o, " EXT ");
+            o = put(o, " 扩 ");
             o = putu(o, m->station_ext);
             *o = '\0';
             field_row(row, TDCS_LABEL[idx], v);
@@ -367,9 +369,9 @@ static void draw_field(uint8_t row, const tdcs_rec_t *r, uint8_t idx)
             break;
         case 19:
             o = v;
-            o = put(o, m->crc_ok ? "OK " : "ERR ");
+            o = put(o, m->crc_ok ? "正常 " : "错误 ");
             if (m->test)
-                o = put(o, "TEST ");
+                o = put(o, "测试 ");
             o = puti(o, r->rssi);
             o = put(o, "dB");
             *o = '\0';
