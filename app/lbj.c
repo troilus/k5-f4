@@ -37,8 +37,9 @@
 #define LBJ_IRQ_DONE   0x2000u
 #define LBJ_IRQ_MASK   (LBJ_IRQ_SYNC | LBJ_IRQ_FIFO | LBJ_IRQ_DONE)
 
-/* POCSAG batch: 4-byte sync + 16 codewords = 68 bytes = 34 16-bit FIFO words. */
-#define LBJ_BATCH_WORDS  34u
+/* POCSAG batch payload: 16 codewords = 64 bytes = 32 16-bit FIFO words.
+ * The engine strips the 4-byte sync; REG_5D is the payload length. */
+#define LBJ_BATCH_WORDS  32u
 
 #define POCSAG_SYNC      0x7CD215D8u
 
@@ -110,13 +111,20 @@ static char *putfreq(char *o, uint32_t f)
 
 /* ---- FSK engine -------------------------------------------------------- */
 
-static void lbj_fsk_arm(void)
+static void lbj_fsk_rearm(void)
 {
-    /* Re-arm without the 30 ms BK4819_ResetFSK() delay: clear REG_02, clear
-     * the RX FIFO and enable FSK RX again. */
-    BK4819_WriteRegister(BK4819_REG_02, 0x0000u);
-    BK4819_WriteRegister(BK4819_REG_59, 0x4068u);
-    BK4819_WriteRegister(BK4819_REG_59, 0x3068u);
+    /* Full AirCopy-style reset between batches.  The light 0x4068/0x3068
+     * re-arm left the FIFO and the bit clock in whatever state the previous
+     * frame ended in, so after a couple of reports the codeword alignment
+     * drifted and only a radio restart recovered.  PrepareFSKReceive()
+     * resets the engine, clears the FIFO and re-enables RX. */
+    BK4819_PrepareFSKReceive();
+
+    BK4819_WriteRegister(BK4819_REG_43, 0x3628u);
+    BK4819_WriteRegister(BK4819_REG_3D, 0x2AABu);
+
+    const uint16_t mask = BK4819_ReadRegister(BK4819_REG_3F);
+    BK4819_WriteRegister(BK4819_REG_3F, (uint16_t)(mask | LBJ_IRQ_MASK));
 }
 
 static void lbj_start(void)
@@ -128,14 +136,14 @@ static void lbj_start(void)
 
     BK4819_ResetFSK();
 
-    /* Direct FSK 1.2K, 1200 baud, POCSAG sync, no CRC, 68-byte batch. */
+    /* Direct FSK 1.2K, 1200 baud, POCSAG sync, no CRC, 64-byte payload. */
     BK4819_WriteRegister(BK4819_REG_70, 0x00E0u);   /* tone2 on, gain 48     */
     BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* tone2 1200 baud       */
     BK4819_WriteRegister(BK4819_REG_58, 0x00C1u);   /* FSK 1.2K RX           */
     BK4819_WriteRegister(BK4819_REG_5A, 0x7CD2u);   /* POCSAG sync 7CD215D8  */
     BK4819_WriteRegister(BK4819_REG_5B, 0x15D8u);
     BK4819_WriteRegister(BK4819_REG_5C, 0xAA30u);   /* no CRC                */
-    BK4819_WriteRegister(BK4819_REG_5D, 0x4300u);   /* 68 bytes              */
+    BK4819_WriteRegister(BK4819_REG_5D, 0x3F00u);   /* 64 bytes = 16 words   */
     BK4819_WriteRegister(BK4819_REG_5E, 0x0201u);   /* FIFO threshold 1 word */
 
     BK4819_PrepareFSKReceive();
@@ -212,6 +220,16 @@ static void lbj_tx_config(void)
     BK4819_WriteRegister(BK4819_REG_5B, 0x15D8u);
 }
 
+static void lbj_tx_wait(void)
+{
+    for (uint16_t t = 0; t < 400u; t++) {
+        if (BK4819_ReadRegister(BK4819_REG_0C) & 1u)
+            break;
+        SYSTEM_DelayMs(5);
+    }
+    BK4819_WriteRegister(BK4819_REG_02, 0x0000u);
+}
+
 static void lbj_tx_send(void)
 {
     if (!LBJ_RxVfoIsLbj())
@@ -249,8 +267,31 @@ static void lbj_tx_send(void)
     RADIO_SetTxParameters();
 
     BK4819_WriteRegister(BK4819_REG_51, 0x0000u);   /* no CTCSS/DCS        */
-    BK4819_WriteRegister(BK4819_REG_3F, 0x8000u);   /* FSK TX finished     */
-    BK4819_WriteRegister(BK4819_REG_59, 0x8068u);   /* clear TX FIFO       */
+
+    /* Packet 1: a long preamble.  The engine's own preamble is only 7
+     * bytes; POCSAG wants 576 bits (72 bytes).  The sync word is set to
+     * 0xAAAAAAAA here so the engine's 4-byte sync is just more 1010...
+     * preamble, not a premature POCSAG sync.  Total: 7 + 4 + 72 bytes. */
+    BK4819_WriteRegister(BK4819_REG_5A, 0xAAAAu);
+    BK4819_WriteRegister(BK4819_REG_5B, 0xAAAAu);
+    BK4819_WriteRegister(BK4819_REG_5D, 0x4700u);   /* 72 bytes            */
+    BK4819_WriteRegister(BK4819_REG_3F, 0x8000u);
+    BK4819_WriteRegister(BK4819_REG_59, 0x8068u);
+    BK4819_WriteRegister(BK4819_REG_59, 0x0068u);
+
+    for (uint8_t i = 0; i < 36u; i++)
+        BK4819_WriteRegister(BK4819_REG_5F, 0xAAAAu);
+
+    SYSTEM_DelayMs(20);
+    BK4819_WriteRegister(BK4819_REG_59, 0x2868u);
+    lbj_tx_wait();
+
+    /* Packet 2: the real POCSAG sync and the 16 codewords. */
+    BK4819_WriteRegister(BK4819_REG_5A, 0x7CD2u);
+    BK4819_WriteRegister(BK4819_REG_5B, 0x15D8u);
+    BK4819_WriteRegister(BK4819_REG_5D, 0x3F00u);   /* 64 bytes            */
+    BK4819_WriteRegister(BK4819_REG_3F, 0x8000u);
+    BK4819_WriteRegister(BK4819_REG_59, 0x8068u);
     BK4819_WriteRegister(BK4819_REG_59, 0x0068u);
 
     for (uint8_t i = 0; i < 16u; i++) {
@@ -262,14 +303,8 @@ static void lbj_tx_send(void)
 
     SYSTEM_DelayMs(20);
     BK4819_WriteRegister(BK4819_REG_59, 0x2868u);   /* FSK TX enable       */
+    lbj_tx_wait();
 
-    for (uint16_t t = 0; t < 400u; t++) {
-        if (BK4819_ReadRegister(BK4819_REG_0C) & 1u)
-            break;
-        SYSTEM_DelayMs(5);
-    }
-
-    BK4819_WriteRegister(BK4819_REG_02, 0x0000u);
     SYSTEM_DelayMs(20);
     BK4819_ResetFSK();
     RADIO_SetupRegisters(true);
@@ -323,6 +358,10 @@ void LBJ_HandleInterrupts(uint16_t bits)
         while (g.fill < LBJ_BATCH_WORDS)
             g.raw[g.fill++] = BK4819_ReadRegister(BK4819_REG_5F);
 
+        /* Every batch starts with its own sync: reset the decoder so a
+         * previous frame's half-finished state cannot leak into this one. */
+        memset(&g.rx, 0, sizeof(g.rx));
+
         /* Prepend the POCSAG sync.  If the engine's FIFO starts with the
          * sync as well, the decoder simply re-syncs on the real one. */
         for (int b = 31; b >= 0; b--)
@@ -342,7 +381,7 @@ void LBJ_HandleInterrupts(uint16_t bits)
         g.fill     = 0;
         g.frames++;
 
-        lbj_fsk_arm();
+        lbj_fsk_rearm();
         g.dirty = true;
     }
 }
@@ -371,6 +410,15 @@ void LBJ_Tick(void)
         return;
     }
     if (!LBJ_RxVfoIsLbj()) {
+        LBJ_StopSampler();
+        return;
+    }
+
+    /* Like the K1 LBJ sampler: only run while the squelch is open.  If the
+     * engine kept running through power save, CheckRadioInterrupts() was
+     * skipped and the FSK FIFO filled with stale words; the next report then
+     * read garbage until the radio was restarted. */
+    if (g_SquelchLost) {
         LBJ_StopSampler();
         return;
     }
