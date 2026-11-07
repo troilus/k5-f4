@@ -278,7 +278,9 @@ void SETTINGS_InitEEPROM(void)
 
     // 0F40..0F47
     EEPROM_ReadBuffer(0x0F40, Data, 8);
-    gSetting_F_LOCK            = (Data[0] < 3) ? Data[0] : F_LOCK_GB;
+    /* Hardcode CN HAM (144-148 / 430-440 / 409-410) at boot, so a stored
+     * ALL/NONE selection cannot enable TX outside the Chinese amateur bands. */
+    gSetting_F_LOCK            = F_LOCK_GB;
 #ifndef ENABLE_FEAT_F4HWN
     gSetting_350TX             = (Data[1] < 2) ? Data[1] : false;  // was true
 #endif
@@ -441,8 +443,8 @@ void SETTINGS_LoadCalibration(void)
         gEeprom.BK4819_XTAL_FREQ_LOW = (Misc.BK4819_XtalFreqLow >= -1000 && Misc.BK4819_XtalFreqLow <= 1000) ? Misc.BK4819_XtalFreqLow : 0;
         gEEPROM_1F8A                 = Misc.EEPROM_1F8A & 0x01FF;
         gEEPROM_1F8C                 = Misc.EEPROM_1F8C & 0x01FF;
-        gEeprom.VOLUME_GAIN          = (Misc.VOLUME_GAIN < 1) ? Misc.VOLUME_GAIN : 20;
-        gEeprom.DAC_GAIN             = (Misc.DAC_GAIN    < 1) ? Misc.DAC_GAIN    : 2;
+        gEeprom.VOLUME_GAIN          = (Misc.VOLUME_GAIN < 1) ? Misc.VOLUME_GAIN : 58;
+        gEeprom.DAC_GAIN             = (Misc.DAC_GAIN    < 1) ? Misc.DAC_GAIN    : 8;
 
         #ifdef ENABLE_FEAT_F4HWN
             gEeprom.VOLUME_GAIN_BACKUP   = gEeprom.VOLUME_GAIN;

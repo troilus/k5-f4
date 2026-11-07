@@ -19,6 +19,9 @@
 
 #include "app/chFrScanner.h"
 #include "app/dtmf.h"
+#ifdef ENABLE_TDCS
+    #include "app/tdcs.h"
+#endif
 #ifdef ENABLE_AM_FIX
     #include "am_fix.h"
 #endif
@@ -468,6 +471,12 @@ void UI_MAIN_TimeSlice500ms(void)
         return;
 #endif
 
+#ifdef ENABLE_TDCS
+        /* A decode window owns the screen: no S-meter over it. */
+        if (TDCS_PopupActive())
+            return;
+#endif
+
         if(FUNCTION_IsRx()) {
             DisplayRSSIBar(true);
         }
@@ -528,6 +537,16 @@ void UI_MAIN_TimeSlice500ms(void)
 void UI_DisplayMain(void)
 {
     char               String[22];
+
+#ifdef ENABLE_TDCS
+    /* A decoded TDCS report owns the screen until EXIT. */
+    if (TDCS_PopupActive())
+    {
+        center_line = CENTER_LINE_NONE;
+        TDCS_DrawPopup();
+        return;
+    }
+#endif
 
     center_line = CENTER_LINE_NONE;
 

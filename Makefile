@@ -18,7 +18,8 @@ ENABLE_DTMF_CALLING           	?= 0
 ENABLE_FLASHLIGHT             	?= 1
 
 # ---- CUSTOM MODS ----
-ENABLE_SPECTRUM               	?= 1
+# TDCS needs the flash: the spectrum analyzer is disabled to make room.
+ENABLE_SPECTRUM               	?= 0
 ENABLE_BIG_FREQ               	?= 1
 ENABLE_SMALL_BOLD             	?= 1
 ENABLE_CUSTOM_MENU_LAYOUT     	?= 1
@@ -43,7 +44,7 @@ ENABLE_BLMIN_TMP_OFF          	?= 0
 ENABLE_SCAN_RANGES            	?= 1
 ENABLE_FEAT_F4HWN             	?= 1
 ENABLE_FEAT_F4HWN_SCREENSHOT  	?= 0
-ENABLE_FEAT_F4HWN_SPECTRUM    	?= 1
+ENABLE_FEAT_F4HWN_SPECTRUM    	?= 0
 
 ENABLE_FEAT_F4HWN_RX_TX_TIMER   ?= 0
 ENABLE_FEAT_F4HWN_CHARGING_C    ?= 0
@@ -61,6 +62,8 @@ ENABLE_FEAT_F4HWN_GMRS_FRS_MURS	?= 0
 ENABLE_FEAT_F4HWN_CA         	?= 0
 ENABLE_FEAT_F4HWN_DEBUG         ?= 0
 ENABLE_REGA	                	?= 0
+ENABLE_TDCS                   	?= 1
+ENABLE_TDCS_TX                	?= 0
 
 
 # ---- DEBUGGING ----
@@ -144,6 +147,9 @@ OBJS += app/common.o
 OBJS += app/dtmf.o
 ifeq ($(ENABLE_REGA),1)
 	OBJS += app/rega.o
+endif
+ifeq ($(ENABLE_TDCS),1)
+	OBJS += app/tdcs.o app/tdcs_dec.o
 endif
 ifeq ($(ENABLE_FLASHLIGHT),1)
 	OBJS += app/flashlight.o
@@ -230,16 +236,13 @@ OBJCOPY = arm-none-eabi-objcopy
 SIZE = arm-none-eabi-size
 
 ifeq ($(ENABLE_FEAT_F4HWN),1)
-	AUTHOR_STRING_1 ?= EGZUMER
-	VERSION_STRING_1 ?= v0.22
-
-	AUTHOR_STRING_2 ?= BD8CKF
-	VERSION_STRING_2 ?= v4.1
+	AUTHOR_STRING_1 ?= TDCS
+	VERSION_STRING_1 ?= v1.0
 
 	EDITION_STRING ?= Custom
 
-	AUTHOR_STRING ?= $(AUTHOR_STRING_1)+$(AUTHOR_STRING_2)
-	VERSION_STRING ?= $(VERSION_STRING_2)
+	AUTHOR_STRING ?= $(AUTHOR_STRING_1)
+	VERSION_STRING ?= $(VERSION_STRING_1)
 
 	SQL_TONE ?= 550 # For SA818, use 600 and python3 sa818.py --port /dev/ttyS2 radio --frequency 434.975 --ctcss 71.9 --tail Open
 else
@@ -412,6 +415,12 @@ endif
 ifeq ($(ENABLE_REGA),1)
 	CFLAGS  += -DENABLE_REGA
 endif
+ifeq ($(ENABLE_TDCS),1)
+	CFLAGS  += -DENABLE_TDCS
+endif
+ifeq ($(ENABLE_TDCS_TX),1)
+	CFLAGS  += -DENABLE_TDCS_TX
+endif
 ifeq ($(ENABLE_AGC_SHOW_DATA),1)
 	CFLAGS  += -DENABLE_AGC_SHOW_DATA
 endif
@@ -428,8 +437,6 @@ ifeq ($(ENABLE_FEAT_F4HWN),1)
 	CFLAGS  += -DENABLE_FEAT_F4HWN
 	CFLAGS  += -DALERT_TOT=10
 	CFLAGS  += -DSQL_TONE=$(SQL_TONE)
-	CFLAGS  += -DAUTHOR_STRING_1=\"$(AUTHOR_STRING_1)\" -DVERSION_STRING_1=\"$(VERSION_STRING_1)\"
-	CFLAGS  += -DAUTHOR_STRING_2=\"$(AUTHOR_STRING_2)\" -DVERSION_STRING_2=\"$(VERSION_STRING_2)\"
 	CFLAGS  += -DEDITION_STRING=\"$(EDITION_STRING)\"
 else
 	CFLAGS  += -DSQL_TONE=550
@@ -529,11 +536,7 @@ else ifneq (,$(HAS_CRCMOD))
 	$(info !!!!!!!! run: pip install crcmod)
 	$(info )
 else
-ifeq ($(ENABLE_FEAT_F4HWN),1)
-	-$(MY_PYTHON) fw-pack.py $<.bin $(AUTHOR_STRING_2) $(VERSION_STRING_2) $<.packed.bin
-else
 	-$(MY_PYTHON) fw-pack.py $<.bin $(AUTHOR_STRING) $(VERSION_STRING) $<.packed.bin
-endif
 endif
 
 	$(SIZE) $<

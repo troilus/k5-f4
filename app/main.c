@@ -26,6 +26,9 @@
 #include "app/generic.h"
 #include "app/main.h"
 #include "app/scanner.h"
+#ifdef ENABLE_TDCS
+    #include "app/tdcs.h"
+#endif
 
 #ifdef ENABLE_SPECTRUM
 #include "app/spectrum.h"
@@ -247,12 +250,23 @@ static void processFKeyFunction(const KEY_Code_t Key, const bool beep)
         case KEY_6:
             ACTION_Power();
             break;
-//F7改VOX或者暂时没功能
+//F7 启动 TDCS（K1 风格：先切到 TDC 模式，再打开最近一条报文）
         case KEY_7:
-#ifdef ENABLE_VOX
+#ifdef ENABLE_TDCS
+            if (gTxVfo->Modulation != MODULATION_TDCS) {
+                gTxVfo->Modulation  = MODULATION_TDCS;
+                gRequestSaveChannel = 1;
+                gVfoConfigureMode   = VFO_CONFIGURE;
+                gUpdateStatus       = true;
+                if (beep)
+                    gBeepToPlay = BEEP_1KHZ_60MS_OPTIONAL;
+            } else if (!TDCS_OpenPopup()) {
+                gBeepToPlay = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
+            }
+#else
+    #ifdef ENABLE_VOX
             ACTION_Vox();
-//#else
-//          toggle_chan_scanlist();
+    #endif
 #endif
             break;
 //F8长按是倒频，F+8在529行

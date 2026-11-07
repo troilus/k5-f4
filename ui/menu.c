@@ -1004,8 +1004,8 @@ void UI_DisplayMenu(void)
         case MENU_VOL:
 #ifdef ENABLE_FEAT_F4HWN
             sprintf(String, "%s\n%s",
-                AUTHOR_STRING_2,
-                VERSION_STRING_2
+                AUTHOR_STRING,
+                VERSION_STRING
             );
 #else
             sprintf(String, "%u.%02uV\n%u%%",

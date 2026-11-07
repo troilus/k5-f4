@@ -2,12 +2,6 @@ name: Build Custom Firmware
 
 on:
   workflow_dispatch:  # Allows manual triggering from GitHub UI
-    inputs:
-      author_string:
-        description: '呼号（用于开机显示和SysInf菜单，如：BD8CKF）'
-        required: true
-        default: 'bd8ckf'
-        type: string
 
 jobs:
   build:
@@ -20,14 +14,7 @@ jobs:
       with:
         fetch-depth: 0  # 获取完整的git历史以获取commit hash
 
-    - name: Get commit hash
-      id: commit
-      run: echo "hash=$(git rev-parse HEAD | cut -c1-5)" >> $GITHUB_OUTPUT
-
     - name: Build custom firmware
-      env:
-        AUTHOR_STRING_2: ${{ inputs.author_string }}
-        VERSION_STRING_2: ${{ steps.commit.outputs.hash }}
       run: |
         chmod +x ./compile-with-docker.sh
         ./compile-with-docker.sh custom

@@ -19,6 +19,9 @@
     #include "app/fm.h"
 #endif
 #include "app/scanner.h"
+#ifdef ENABLE_TDCS
+    #include "app/tdcs.h"
+#endif
 #include "audio.h"
 #include "functions.h"
 #include "helper/battery.h"
@@ -84,7 +87,11 @@ void SystickHandler(void)
     if (gCurrentFunction == FUNCTION_POWER_SAVE)
         DECREMENT_AND_TRIGGER(gPowerSave_10ms, gPowerSaveCountdownExpired);
 
-    if (gScanStateDir == SCAN_OFF && !gCssBackgroundScan && gEeprom.DUAL_WATCH != DUAL_WATCH_OFF)
+    if (gScanStateDir == SCAN_OFF && !gCssBackgroundScan && gEeprom.DUAL_WATCH != DUAL_WATCH_OFF
+#ifdef ENABLE_TDCS
+        && !TDCS_Active()  /* hold the TDCS mode while decoding */
+#endif
+    )
         if (gCurrentFunction != FUNCTION_MONITOR && gCurrentFunction != FUNCTION_TRANSMIT && gCurrentFunction != FUNCTION_RECEIVE)
             DECREMENT_AND_TRIGGER(gDualWatchCountdown_10ms, gScheduleDualWatch);
 
