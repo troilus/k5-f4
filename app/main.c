@@ -250,17 +250,10 @@ static void processFKeyFunction(const KEY_Code_t Key, const bool beep)
         case KEY_6:
             ACTION_Power();
             break;
-//F7 启动 TDCS（K1 风格：先切到 TDC 模式，再打开最近一条报文）
+//F7 打开 TDCS 历史窗口（任何模式/频率都可以看已解码的报文）
         case KEY_7:
 #ifdef ENABLE_TDCS
-            if (gTxVfo->Modulation != MODULATION_TDCS) {
-                gTxVfo->Modulation  = MODULATION_TDCS;
-                gRequestSaveChannel = 1;
-                gVfoConfigureMode   = VFO_CONFIGURE;
-                gUpdateStatus       = true;
-                if (beep)
-                    gBeepToPlay = BEEP_1KHZ_60MS_OPTIONAL;
-            } else if (!TDCS_OpenPopup()) {
+            if (!TDCS_OpenPopup()) {
                 gBeepToPlay = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
             }
 #else

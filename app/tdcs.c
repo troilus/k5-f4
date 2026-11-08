@@ -33,10 +33,10 @@
 /* ---- receiver ---------------------------------------------------------- */
 
 #define TDCS_HISTORY        8u
-#define TDCS_PAGES          4u
+#define TDCS_PAGES          3u
 #define TDCS_ROWS           6u
 #define TDCS_FOOTER         6u
-#define TDCS_FIELDS         20u
+#define TDCS_FIELDS         18u
 #define TDCS_MERGE_SECS     30u
 #define TDCS_POPUP_SECS     10u   /* fixed: the K1 TCDPOP setting is skipped */
 #define TDCS_STALL_TICKS    150u  /* 1.5 s without FIFO/sync = carrier gone  */
@@ -189,28 +189,35 @@ static const char *sig_type_name(uint8_t v)
 }
 
 /* Short labels: an 8x8 Chinese glyph advances 9 px, so a four-character label
- * still leaves most of the 128 px row for the value.  Index 14/18 (STNEXT and
- * DRVEXT) are merged into 13/17 and never drawn. */
+ * with ": " still leaves most of the 128 px row for the value. */
 static const char *const TDCS_LABEL[TDCS_FIELDS] = {
     "信号机", "信号种类", "本补客货", "车次种类", "车次",
     "机车类型", "类型扩充", "机车号", "公里标", "速度",
-    "总重", "计长", "辆数", "车站号", "",
-    "区段号", "实际交路", "司机号", "",
-    "状态"
+    "总重", "计长", "辆数", "车站号",
+    "区段号", "实际交路", "司机号", "状态"
 };
 
-/* Display order: the order in the frame is not the order an operator reads. */
+/* Display order: the order in the frame is not the order an operator reads.
+ * Exactly 18 fields over three pages of six rows, the UV-K1 arrangement. */
 static const uint8_t TDCS_PAGE_MAP[TDCS_PAGES][TDCS_ROWS] = {
     {  3,  4,  5,  6,  7,  8 },   /* CLASS TRAIN LOCO TYPE LOCO# KM   */
-    {  9, 10, 11, 12, 13, 0xFF }, /* SPEED WEIGHT LENGTH CARS STN+EXT      */
-    { 15, 16, 17, 0xFF,  0,  1 }, /* SECT ROUTE DRIVER+EXT SIGNAL SIGTYP   */
-    {  2, 19, 0xFF, 0xFF, 0xFF, 0xFF }   /* CREW STATUS */
+    {  9, 10, 11, 12, 13, 14 },   /* SPEED WEIGHT LENGTH CARS STN SECT */
+    { 15, 16, 17,  0,  1,  2 }    /* ROUTE DRIVER STATUS SIG SIGTYP CREW */
 };
 
 static void field_row(uint8_t row, const char *label, const char *value)
 {
-    UI_PrintStringSmallCN(label, 0, row);
-    UI_PrintStringSmallCN(value, 52, row);
+    char s[48];
+    char *o = s;
+
+    while (*label)
+        *o++ = *label++;
+    *o++ = ':';
+    *o++ = ' ';
+    while (*value)
+        *o++ = *value++;
+    *o = '\0';
+    UI_PrintStringSmallCN(s, 0, row);
 }
 
 static void draw_field(uint8_t row, const tdcs_rec_t *r, uint8_t idx)
@@ -244,13 +251,12 @@ static void draw_field(uint8_t row, const tdcs_rec_t *r, uint8_t idx)
             field_row(row, TDCS_LABEL[idx], n);
             break;
         }
-        case 2: {
-            static const char *const CREW[4] = {
-                "主货", "主客", "补货", "补客"
-            };
-            field_row(row, TDCS_LABEL[idx], CREW[m->crew & 3u]);
+        case 2:
+            o = put(v, (m->crew & 2u) ? "补机 " : "本务 ");
+            o = put(o, (m->crew & 1u) ? "客车" : "货车");
+            *o = '\0';
+            field_row(row, TDCS_LABEL[idx], v);
             break;
-        }
         case 3: {
             bool any = false;
             o = v;
@@ -335,39 +341,29 @@ static void draw_field(uint8_t row, const tdcs_rec_t *r, uint8_t idx)
             break;
         case 13:
             o = putu(v, m->station);
-            o = put(o, " 扩 ");
+            o = put(o, " 扩充 ");
             o = putu(o, m->station_ext);
             *o = '\0';
             field_row(row, TDCS_LABEL[idx], v);
             break;
         case 14:
-            o = putu(v, m->station_ext);
-            *o = '\0';
-            field_row(row, TDCS_LABEL[idx], v);
-            break;
-        case 15:
             o = putu(v, m->section);
             *o = '\0';
             field_row(row, TDCS_LABEL[idx], v);
             break;
-        case 16:
+        case 15:
             o = putu(v, m->route);
             *o = '\0';
             field_row(row, TDCS_LABEL[idx], v);
             break;
-        case 17:
+        case 16:
             o = putu(v, m->driver);
-            *o++ = ' ';
+            o = put(o, " 扩充 ");
             o = putu(o, m->driver_ext);
             *o = '\0';
             field_row(row, TDCS_LABEL[idx], v);
             break;
-        case 18:
-            o = putu(v, m->driver_ext);
-            *o = '\0';
-            field_row(row, TDCS_LABEL[idx], v);
-            break;
-        case 19:
+        case 17:
             o = v;
             o = put(o, m->crc_ok ? "正常 " : "错误 ");
             if (m->test)
@@ -654,6 +650,7 @@ bool TDCS_OpenPopup(void)
     g.pinned    = true;       /* opened by hand: it never times out */
     g.dismissed = false;
     g.dirty     = true;
+    gUpdateDisplay = true;
     return true;
 }
 
@@ -930,10 +927,19 @@ void TDCS_Tick(void)
     }
 
     if (!tdcs_any_vfo()) {
-        TDCS_ClosePopup();
+        /* A window opened by hand stays up on any mode/frequency; only a
+         * report-triggered window follows the TDCS VFO. */
+        if (!g.pinned)
+            TDCS_ClosePopup();
         TDCS_StopSampler();
         if (!g_SquelchLost)
             g.dismissed = false;
+        if (g.dirty) {
+            g.dirty = false;
+            g.popSec = g.sec;
+            BACKLIGHT_TurnOn();
+            gUpdateDisplay = true;
+        }
         return;
     }
 
