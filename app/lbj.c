@@ -79,16 +79,18 @@ typedef struct {
     uint16_t reg58;
     uint16_t reg5c;
     uint16_t reg70;
+    uint8_t  flags;      /* 1 = POCSAG P front end (C7) */
 } lbj_cfg_t;
 
 static const lbj_cfg_t LBJ_CFG[] = {
-    { 0x00C1u, 0xAA30u, 0x00E0u },   /* 0: current AirCopy values      */
-    { 0x00C1u, 0x5625u, 0x00E0u },   /* 1: TDCS real-signal clock rec. */
-    { 0x37C3u, 0xAA30u, 0x00E0u },   /* 2: Roger MDC RX, gain 11       */
-    { 0x37C3u, 0x5625u, 0x00E0u },   /* 3: combination                 */
-    { 0x00C3u, 0x5625u, 0x00E0u },   /* 4: RX mode variant             */
-    { 0x00C1u, 0x5665u, 0x00E0u },   /* 5: CRC on, other clock rec.    */
-    { 0x00C1u, 0x5625u, 0x00C3u },   /* 6: FSK level variant           */
+    { 0x00C1u, 0xAA30u, 0x00E0u, 0u },   /* 0: current AirCopy values      */
+    { 0x00C1u, 0x5625u, 0x00E0u, 0u },   /* 1: TDCS real-signal clock rec. */
+    { 0x37C3u, 0xAA30u, 0x00E0u, 0u },   /* 2: Roger MDC RX, gain 11       */
+    { 0x37C3u, 0x5625u, 0x00E0u, 0u },   /* 3: combination                 */
+    { 0x00C3u, 0x5625u, 0x00E0u, 0u },   /* 4: RX mode variant             */
+    { 0x00C1u, 0x5665u, 0x00E0u, 0u },   /* 5: CRC on, other clock rec.    */
+    { 0x00C1u, 0x5625u, 0x00C3u, 0u },   /* 6: FSK level variant           */
+    { 0x03C1u, 0x5625u, 0x0000u, 1u },   /* 7: POCSAG P front end          */
 };
 
 #define LBJ_CFG_COUNT ((uint8_t)(sizeof(LBJ_CFG) / sizeof(LBJ_CFG[0])))
@@ -217,6 +219,38 @@ static uint8_t lbj_measure_addr(const uint16_t *w, bool inv, uint8_t *shift)
 
 /* ---- FSK engine -------------------------------------------------------- */
 
+/* Apply the RX front end selected by the config.  C0..C6 keep the original
+ * AirCopy/RAW values; C7 (flags=1) is the POCSAG P profile from the BK4819
+ * datasheet and the Manawyrm POCSAG transmitter:
+ *   - 7.5 kHz RF filter instead of 6 kHz
+ *   - 64-byte payload instead of 63
+ *   - RX FIFO almost-full at 4 words
+ *   - DC filter and ALC off, FM sub-audio filters off
+ *   - 7-byte preamble comes from BK4819_PrepareFSKReceive() itself */
+static void lbj_apply_frontend(const lbj_cfg_t *c)
+{
+    const bool p = c->flags != 0u;
+
+    BK4819_WriteRegister(BK4819_REG_5D, p ? 0x4000u : 0x3F00u);
+    BK4819_WriteRegister(BK4819_REG_5E, p ? 0x0204u : 0x0201u);
+    BK4819_WriteRegister(BK4819_REG_43, p ? 0x47A8u : 0x3628u);
+    BK4819_WriteRegister(BK4819_REG_3D, 0x2AABu);
+
+    uint16_t reg2b = BK4819_ReadRegister(BK4819_REG_2B);
+    if (p) {
+        reg2b = (uint16_t)((reg2b & 0xF8F8u) | 0x0707u);
+    } else {
+        reg2b |= (1u << 10) | (1u << 9) | (1u << 8);
+        reg2b &= ~((1u << 2) | (1u << 1) | (1u << 0));
+    }
+    BK4819_WriteRegister(BK4819_REG_2B, reg2b);
+
+    if (p) {
+        const uint16_t reg7e = BK4819_ReadRegister(BK4819_REG_7E);
+        BK4819_WriteRegister(BK4819_REG_7E, (uint16_t)(reg7e & 0xFFC0u));
+    }
+}
+
 static void lbj_fsk_rearm(void)
 {
     /* Full AirCopy-style reset between batches.  The light 0x4068/0x3068
@@ -226,8 +260,7 @@ static void lbj_fsk_rearm(void)
      * resets the engine, clears the FIFO and re-enables RX. */
     BK4819_PrepareFSKReceive();
 
-    BK4819_WriteRegister(BK4819_REG_43, 0x3628u);
-    BK4819_WriteRegister(BK4819_REG_3D, 0x2AABu);
+    lbj_apply_frontend(&LBJ_CFG[g.cfg % LBJ_CFG_COUNT]);
 
     const uint16_t mask = BK4819_ReadRegister(BK4819_REG_3F);
     BK4819_WriteRegister(BK4819_REG_3F, (uint16_t)(mask | LBJ_IRQ_MASK));
@@ -251,22 +284,9 @@ static void lbj_start(void)
     BK4819_WriteRegister(BK4819_REG_5A, 0x7CD2u);   /* POCSAG sync 7CD215D8  */
     BK4819_WriteRegister(BK4819_REG_5B, 0x15D8u);
     BK4819_WriteRegister(BK4819_REG_5C, c->reg5c);
-    BK4819_WriteRegister(BK4819_REG_5D, 0x3F00u);   /* 64 bytes = 16 words   */
-    BK4819_WriteRegister(BK4819_REG_5E, 0x0201u);   /* FIFO threshold 1 word */
 
     BK4819_PrepareFSKReceive();
-
-    /* 25 kHz IF and the wide weak-signal filter, as in the BYP/RAW mode. */
-    BK4819_WriteRegister(BK4819_REG_43, 0x3628u);
-    BK4819_WriteRegister(BK4819_REG_3D, 0x2AABu);
-
-    /* K1 LBJ RAW profile: the FM audio chain's 300 Hz HPF, 3 kHz LPF and
-     * de-emphasis destroy the POCSAG NRZ before the slicer sees it.  The K1
-     * LBJRadio disables exactly these three RX filter bits. */
-    uint16_t reg2b = BK4819_ReadRegister(BK4819_REG_2B);
-    reg2b |= (1u << 10) | (1u << 9) | (1u << 8);
-    reg2b &= ~((1u << 2) | (1u << 1) | (1u << 0));
-    BK4819_WriteRegister(BK4819_REG_2B, reg2b);
+    lbj_apply_frontend(c);
 
     const uint16_t mask = BK4819_ReadRegister(BK4819_REG_3F);
     BK4819_WriteRegister(BK4819_REG_3F, (uint16_t)(mask | LBJ_IRQ_MASK));
