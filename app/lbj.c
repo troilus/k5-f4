@@ -65,7 +65,8 @@ static struct {
     uint32_t lastFreq;
     uint8_t  cfg;        /* LBJ_CFG index                          */
     uint8_t  order;      /* 0 M, 1 L, 2 I, 3 J (bit 0 LSB, bit 1 inverted) */
-    uint8_t  shift;      /* last bit offset chosen by the BCH search */
+    uint8_t  shift;      /* bit offset of the closest known address */
+    uint8_t  addrDist;   /* Hamming distance to that address word   */
     uint8_t  txState;    /* 0 idle, 1 sending, 2 sent, 3 denied    */
     uint16_t txTick;
 } g;
@@ -161,50 +162,56 @@ static uint32_t lbj_word_at(const uint16_t *w, uint16_t bit)
     return cw;
 }
 
-/* The BK4819 sync detector can lock one or more bits away from the real
- * codeword boundary; one bit of shift turns every codeword into garbage.
- * Score all 32 shifts and keep the one that produces the most LBJ-shaped
- * words: an address in 1233980..1234020 is worth the most, an idle word
- * next, any other BCH-valid word one point. */
-static uint8_t lbj_find_shift(const uint16_t *w, bool inv)
+/* Known LBJ address codewords: 1233999 and 1234000, all four functions.
+ * 1234001/1234002 share the 1234000 codewords; the frame slot, not the
+ * codeword, selects the exact address.  These are constants from the POCSAG
+ * BCH encoder, so comparing against them is a measurement, not a heuristic. */
+static const uint32_t LBJ_ADDR_CW[8] = {
+    0x4B5122C4u, 0x4B512C17u, 0x4B5131B2u, 0x4B513F61u,
+    0x4B514723u, 0x4B5149F0u, 0x4B515455u, 0x4B515A86u
+};
+
+/* 32-bit popcount (same as lbj_dec.c; kept local so the measurement does not
+ * depend on the decoder's internals). */
+static uint8_t lbj_pc32(uint32_t x)
 {
-    uint8_t bestShift = 0u;
-    int16_t bestScore = -1;
+    x = x - ((x >> 1) & 0x55555555u);
+    x = (x & 0x33333333u) + ((x >> 2) & 0x33333333u);
+    x = (x + (x >> 4)) & 0x0F0F0F0Fu;
+    return (uint8_t)((x * 0x01010101u) >> 24);
+}
+
+/* Scan all 32 shifts and all 16 codewords for the closest known LBJ address
+ * codeword.  Returns the minimum Hamming distance and stores the shift that
+ * produced it.  D <= 2 means the address word is present at that shift;
+ * a large D means the raw bits are noise or the front end is wrong. */
+static uint8_t lbj_measure_addr(const uint16_t *w, bool inv, uint8_t *shift)
+{
+    uint8_t bestD = 32u;
+    uint8_t bestS = 0u;
 
     for (uint8_t sh = 0; sh < 32u; sh++) {
-        int16_t score = 0;
-
-        for (uint8_t j = 0; j < 8u; j++) {
+        for (uint8_t j = 0; j < 16u; j++) {
             uint32_t cw = lbj_word_at(w, (uint16_t)(sh + j * 32u));
-            uint32_t cor;
             if (inv)
                 cw = ~cw;
-            if (lbj_bch_check(cw, &cor) >= 2u)
-                continue;
 
-            if (cor == POCSAG_IDLE) {
-                score += 2;
-            } else if (!(cor >> 31)) {
-                const uint32_t addr =
-                    ((cor >> 13) & 0x3FFFFu) * 8u + (uint32_t)(j >> 1);
-                if (addr >= 1233980u && addr <= 1234020u)
-                    score += 8;
-                else
-                    score += 1;
-            } else {
-                score += 1;
+            for (uint8_t k = 0; k < 8u; k++) {
+                const uint8_t d = lbj_pc32(cw ^ LBJ_ADDR_CW[k]);
+                if (d < bestD) {
+                    bestD = d;
+                    bestS = sh;
+                    if (!d) {
+                        *shift = bestS;
+                        return bestD;
+                    }
+                }
             }
-        }
-
-        if (score > bestScore) {
-            bestScore = score;
-            bestShift = sh;
-            if (score >= 10)           /* an LBJ address plus a valid word */
-                break;
         }
     }
 
-    return bestShift;
+    *shift = bestS;
+    return bestD;
 }
 
 /* ---- FSK engine -------------------------------------------------------- */
@@ -510,8 +517,16 @@ void LBJ_HandleInterrupts(uint16_t bits)
         for (uint8_t n = 0; n < LBJ_BATCH_WORDS; n++)
             words[n] = lsb ? rev16(g.raw[n]) : g.raw[n];
 
-        const uint8_t shift = lbj_find_shift(words, inv);
-        g.shift = shift;
+        uint8_t measuredShift = 0u;
+        const uint8_t addrDist = lbj_measure_addr(words, inv, &measuredShift);
+
+        g.addrDist = addrDist;
+        g.shift    = measuredShift;
+
+        /* Only trust the measured shift when a known LBJ address word is
+         * within two bits; otherwise leave the payload at offset 0 and let
+         * the decoder try.  This stops the shift from following noise. */
+        const uint8_t shift = (addrDist <= 2u) ? measuredShift : 0u;
 
         /* Every batch starts with its own sync: reset the decoder so a
          * previous frame's half-finished state cannot leak into this one. */
@@ -622,10 +637,10 @@ void LBJ_Draw(void)
         o = putu(o, g.shortAddr);
     else
         o = put(o, "-------");
-    o = put(o, " F");
-    o = putu(o, g.frames);
     o = put(o, " S");
     o = putu(o, g.shift);
+    o = put(o, " D");
+    o = putu(o, g.addrDist);
     *o = '\0';
     UI_PrintStringSmallNormal(s, 0, 0, 0);
 
@@ -676,10 +691,10 @@ void LBJ_Draw(void)
     }
 
     o = s;
-    o = put(o, "C");
+    o = put(o, "F");
+    o = putu(o, g.frames);
+    o = put(o, " C");
     o = putu(o, g.cfg);
-    o = put(o, " 58=");
-    o = puthex4(o, LBJ_CFG[g.cfg % LBJ_CFG_COUNT].reg58);
     o = put(o, " 5C=");
     o = puthex2(o, (uint8_t)LBJ_CFG[g.cfg % LBJ_CFG_COUNT].reg5c);
     static const char ORDER_CHAR[] = "MLIJ";

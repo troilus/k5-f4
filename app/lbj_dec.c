@@ -99,13 +99,6 @@ static uint8_t bch_dec(uint32_t cw, uint32_t *out)
     return 2u;
 }
 
-/* Trial decode for the bit-shift search in lbj.c: same result codes as
- * bch_dec(), with the corrected word handed back. */
-uint8_t lbj_bch_check(uint32_t cw, uint32_t *out)
-{
-    return bch_dec(cw, out);
-}
-
 /* One message finished: extract the BCD string and hand it to the app.  The
  * buffer is static (BSS) so the app's stack is not grown by 70 bytes. */
 static void lbj_flush(lbj_rx_t *r)

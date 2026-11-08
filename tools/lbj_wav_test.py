@@ -129,27 +129,28 @@ def word_at(bits, bit, inv):
     return cw
 
 
-def score_shift(bits, inv):
-    best = (0, -1)  # shift, score
+ADDR_CW = [
+    0x4B5122C4, 0x4B512C17, 0x4B5131B2, 0x4B513F61,
+    0x4B514723, 0x4B5149F0, 0x4B515455, 0x4B515A86,
+]
+
+
+def measure_addr(bits, inv):
+    """Minimum Hamming distance to a known LBJ address codeword over all
+    shifts and all 16 codeword positions.  Returns (distance, shift)."""
+    best_d = 32
+    best_sh = 0
     for sh in range(32):
-        score = 0
-        for j in range(8):
+        for j in range(16):
             cw = word_at(bits, sh + j * 32, inv)
-            cor, st = bch_dec(cw)
-            if st >= 2:
-                continue
-            if cor == IDLE:
-                score += 2
-            elif not (cor >> 31):
-                addr = ((cor >> 13) & 0x3FFFF) * 8 + (j >> 1)
-                score += 8 if LBJ_MIN <= addr <= LBJ_MAX else 1
-            else:
-                score += 1
-        if score > best[1]:
-            best = (sh, score)
-            if score >= 10:
-                break
-    return best
+            for ref in ADDR_CW:
+                d = pc32(cw ^ ref)
+                if d < best_d:
+                    best_d = d
+                    best_sh = sh
+                    if d == 0:
+                        return best_d, best_sh
+    return best_d, best_sh
 
 
 def decode_bcd(cws):
@@ -181,17 +182,20 @@ def main():
         if pos is None:
             continue
         payload = bits[pos + 32:]
-        sh, score = score_shift(payload, inv)
-        if best is None or score > best[0]:
-            best = (score, phase, pos, sh, inv, payload)
+        d, sh = measure_addr(payload, inv)
+        if best is None or d < best[0]:
+            best = (d, phase, pos, sh, inv, payload)
 
     if best is None:
         print("FAIL: no POCSAG sync found")
         return 1
 
-    score, phase, pos, sh, inv, payload = best
-    print("sync: phase=%d bit=%d inverted=%s shift=%d score=%d" %
-          (phase, pos, inv, sh, score))
+    dist, phase, pos, sh, inv, payload = best
+    print("sync: phase=%d bit=%d inverted=%s shift=%d D=%d" %
+          (phase, pos, inv, sh, dist))
+    if dist > 2:
+        print("address not within 2 bits; decoding at shift 0")
+        sh = 0
 
     words = []
     for j in range(16):

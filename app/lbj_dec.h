@@ -43,10 +43,6 @@ typedef struct {
 void lbj_rx_bit(lbj_rx_t *r, uint8_t bit);   /* ISR context: align + queue     */
 void lbj_process(lbj_rx_t *r);               /* main loop: BCH + state machine */
 
-/* Trial BCH decode for the bit-shift search: 0 clean, 1 repaired, 2 bad.
- * `out` receives the corrected codeword (or the input when bad). */
-uint8_t lbj_bch_check(uint32_t cw, uint32_t *out);
-
 /* Provided by lbj_dual.c: one call per completed report. */
 void lbj_emit_msg(const lbj_rx_t *r, const char *bcd, uint16_t len);
 
