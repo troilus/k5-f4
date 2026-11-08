@@ -5,8 +5,9 @@
 
 #define POC_SYNC      0x7CD215D8u
 #define POC_IDLE      2055848343u
-#define SYNC_ERR      2u        /* wrong bits tolerated in a sync word (upstream);
-                                 * the complement test is e >= 32 - SYNC_ERR */
+#define SYNC_ERR      3u        /* wrong bits tolerated in a sync word.  The
+                                 * real LBJ sync can arrive with 3 bit errors;
+                                 * the address filter rejects false frames. */
 
 /* 32-bit popcount without a hardware instruction. */
 static uint8_t pc32(uint32_t x)
@@ -30,19 +31,33 @@ static uint16_t bch_syn(uint32_t d31)
     return r;
 }
 
-/* BCH(31,21) decode. Returns 0 when the word was already clean, 1 when a
- * single bit was corrected, 2 when it is uncorrectable. The 31 single-bit
- * syndromes are recomputed on demand (no 62-byte table).
+/* Syndrome of each single-bit error, bit 30 (MSB of d31) .. bit 0.  A
+ * two-bit error syndrome is the XOR of two of these; the 465 pairs are
+ * distinct because BCH(31,21) has minimum distance 5. */
+static const uint16_t BCH_SYN1[31] = {
+    0x001, 0x002, 0x004, 0x008, 0x010, 0x020, 0x040, 0x080, 0x100, 0x200,
+    0x369, 0x1BB, 0x376, 0x185, 0x30A, 0x17D, 0x2FA, 0x29D, 0x253, 0x3CF,
+    0x0F7, 0x1EE, 0x3DC, 0x0D1, 0x1A2, 0x344, 0x1E1, 0x3C2, 0x0ED, 0x1DA,
+    0x3B4
+};
+
+/* BCH(31,21) decode. Returns 0 when the word was already clean, 1 when one
+ * or two bits were corrected, 2 when it is uncorrectable.
  *
- * The syndrome only sees the 31-bit BCH word, never the trailing even-parity
- * bit, so the parity is checked too (as upstream fix() does): a null syndrome
- * with odd parity means the parity bit itself is the one in error, and a bit
- * correction that still leaves the parity odd means a second bit was wrong -
- * both are caught, where a syndrome-only decoder would keep a bad word. */
+ * BCH(31,21) has d = 5 and can correct two errors, not just one.  The real
+ * LBJ signal often arrives with two bit errors per codeword; a one-bit-only
+ * decoder throws those words away.  The trailing even-parity bit is outside
+ * the 31-bit BCH word, so it is checked separately:
+ *   - null syndrome + odd parity      -> the parity bit itself is wrong
+ *   - one-bit syndrome + odd parity   -> one BCH bit + the parity bit
+ *   - two-bit syndrome                -> both BCH bits
+ * A syndrome that matches a pair but leaves odd parity is a third error; it
+ * is reported uncorrectable rather than "fixed" into a wrong codeword. */
 static uint8_t bch_dec(uint32_t cw, uint32_t *out)
 {
-    uint32_t d31 = (cw >> 1) & 0x7FFFFFFFu;
-    uint16_t s = bch_syn(d31);
+    const uint32_t d31 = (cw >> 1) & 0x7FFFFFFFu;
+    const uint16_t s = bch_syn(d31);
+
     if (!s) {
         if (pc32(cw) & 1u) {           /* the parity bit is the error */
             *out = cw ^ 1u;
@@ -51,18 +66,44 @@ static uint8_t bch_dec(uint32_t cw, uint32_t *out)
         *out = cw;
         return 0u;
     }
+
+    /* One BCH bit, optionally plus the parity bit. */
     for (uint8_t p = 0; p < 31u; p++) {
-        if (bch_syn(1u << p) == s) {
-            uint32_t c = ((d31 ^ (1u << p)) << 1) | (cw & 1u);
-            if ((pc32(c) & 1u) == 0u) {   /* even parity: the one bit was it */
+        if (BCH_SYN1[p] != s)
+            continue;
+        uint32_t c = ((d31 ^ (1u << p)) << 1) | (cw & 1u);
+        if ((pc32(c) & 1u) == 0u) {
+            *out = c;
+            return 1u;
+        }
+        *out = c ^ 1u;                 /* the parity bit was wrong too */
+        return 1u;
+    }
+
+    /* Two BCH bits. */
+    for (uint8_t p = 0; p < 31u; p++) {
+        for (uint8_t q = (uint8_t)(p + 1u); q < 31u; q++) {
+            if ((uint16_t)(BCH_SYN1[p] ^ BCH_SYN1[q]) != s)
+                continue;
+            uint32_t c = ((d31 ^ (1u << p) ^ (1u << q)) << 1) | (cw & 1u);
+            if ((pc32(c) & 1u) == 0u) {
                 *out = c;
                 return 1u;
             }
-            break;                        /* odd: a second bit is wrong too */
+            *out = cw;                 /* third bit: do not guess */
+            return 2u;
         }
     }
+
     *out = cw;
     return 2u;
+}
+
+/* Trial decode for the bit-shift search in lbj.c: same result codes as
+ * bch_dec(), with the corrected word handed back. */
+uint8_t lbj_bch_check(uint32_t cw, uint32_t *out)
+{
+    return bch_dec(cw, out);
 }
 
 /* One message finished: extract the BCD string and hand it to the app.  The

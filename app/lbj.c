@@ -40,8 +40,10 @@
 /* POCSAG batch payload: 16 codewords = 64 bytes = 32 16-bit FIFO words.
  * The engine strips the 4-byte sync; REG_5D is the payload length. */
 #define LBJ_BATCH_WORDS  32u
+#define LBJ_BATCH_BITS   (LBJ_BATCH_WORDS * 16u)
 
 #define POCSAG_SYNC      0x7CD215D8u
+#define POCSAG_IDLE      0x7A89C197u
 
 static struct {
     bool     on;
@@ -139,6 +141,69 @@ static uint16_t rev16(uint16_t v)
     v = (uint16_t)(((v & 0x3333u) << 2) | ((v >> 2) & 0x3333u));
     v = (uint16_t)(((v & 0x0F0Fu) << 4) | ((v >> 4) & 0x0F0Fu));
     return (uint16_t)((v << 8) | (v >> 8));
+}
+
+/* Bit at index `i` of the 512-bit batch payload, MSB first inside each word. */
+static uint8_t lbj_payload_bit(const uint16_t *w, uint16_t i)
+{
+    return (uint8_t)((w[i >> 4] >> (15u - (i & 15u))) & 1u);
+}
+
+/* 32 bits starting at `bit`, zero-padded past the end of the batch. */
+static uint32_t lbj_word_at(const uint16_t *w, uint16_t bit)
+{
+    uint32_t cw = 0;
+    for (uint8_t b = 0; b < 32u; b++) {
+        const uint16_t i = (uint16_t)(bit + b);
+        cw = (cw << 1) | (i < LBJ_BATCH_BITS ? lbj_payload_bit(w, i) : 0u);
+    }
+    return cw;
+}
+
+/* The BK4819 sync detector can lock one or more bits away from the real
+ * codeword boundary; one bit of shift turns every codeword into garbage.
+ * Score all 32 shifts and keep the one that produces the most LBJ-shaped
+ * words: an address in 1233980..1234020 is worth the most, an idle word
+ * next, any other BCH-valid word one point. */
+static uint8_t lbj_find_shift(const uint16_t *w, bool inv)
+{
+    uint8_t bestShift = 0u;
+    int16_t bestScore = -1;
+
+    for (uint8_t sh = 0; sh < 32u; sh++) {
+        int16_t score = 0;
+
+        for (uint8_t j = 0; j < 8u; j++) {
+            uint32_t cw = lbj_word_at(w, (uint16_t)(sh + j * 32u));
+            uint32_t cor;
+            if (inv)
+                cw = ~cw;
+            if (lbj_bch_check(cw, &cor) >= 2u)
+                continue;
+
+            if (cor == POCSAG_IDLE) {
+                score += 2;
+            } else if (!(cor >> 31)) {
+                const uint32_t addr =
+                    ((cor >> 13) & 0x3FFFFu) * 8u + (uint32_t)(j >> 1);
+                if (addr >= 1233980u && addr <= 1234020u)
+                    score += 8;
+                else
+                    score += 1;
+            } else {
+                score += 1;
+            }
+        }
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestShift = sh;
+            if (score >= 10)           /* an LBJ address plus a valid word */
+                break;
+        }
+    }
+
+    return bestShift;
 }
 
 /* ---- FSK engine -------------------------------------------------------- */
@@ -436,6 +501,16 @@ void LBJ_HandleInterrupts(uint16_t bits)
         const bool lsb = (g.order & 1u) != 0u;
         const bool inv = (g.order & 2u) != 0u;
 
+        /* Rebuild the 512-bit batch in air order, then let the BCH score all
+         * 32 bit offsets.  The hardware sync can be one or more bits away
+         * from the real codeword boundary; without this search a one-bit
+         * offset turns every codeword into garbage. */
+        uint16_t words[LBJ_BATCH_WORDS];
+        for (uint8_t n = 0; n < LBJ_BATCH_WORDS; n++)
+            words[n] = lsb ? rev16(g.raw[n]) : g.raw[n];
+
+        const uint8_t shift = lbj_find_shift(words, inv);
+
         /* Every batch starts with its own sync: reset the decoder so a
          * previous frame's half-finished state cannot leak into this one. */
         memset(&g.rx, 0, sizeof(g.rx));
@@ -449,13 +524,15 @@ void LBJ_HandleInterrupts(uint16_t bits)
             lbj_rx_bit(&g.rx, (uint8_t)((sync >> b) & 1u));
         lbj_process(&g.rx);
 
-        for (uint8_t n = 0; n + 1u < LBJ_BATCH_WORDS; n = (uint8_t)(n + 2u)) {
-            const uint16_t w0 = lsb ? rev16(g.raw[n]) : g.raw[n];
-            const uint16_t w1 = lsb ? rev16(g.raw[n + 1u]) : g.raw[n + 1u];
-            const uint32_t cw = ((uint32_t)w0 << 16) | (uint32_t)w1;
+        for (uint8_t j = 0; j < 16u; j++) {
+            const uint16_t start = (uint16_t)(shift + j * 32u);
 
-            for (int b = 31; b >= 0; b--)
-                lbj_rx_bit(&g.rx, (uint8_t)((cw >> b) & 1u));
+            for (uint8_t b = 0; b < 32u; b++) {
+                const uint16_t i = (uint16_t)(start + b);
+                const uint8_t bit =
+                    i < LBJ_BATCH_BITS ? lbj_payload_bit(words, i) : 0u;
+                lbj_rx_bit(&g.rx, bit);
+            }
             lbj_process(&g.rx);
         }
 

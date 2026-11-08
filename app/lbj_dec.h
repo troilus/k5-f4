@@ -5,12 +5,12 @@
  * POCSAG codeword: [1 id][20 data][10 BCH][1 even parity], MSB first.
  *   id=0 address word: data20 = ((addr>>3)<<2) | func
  *   id=1 message word: data20 = 5 BCD nibbles, each bit-reversed.
- * BCH(31,21), generator feedback 873; single-bit correction, the trailing
- * even-parity bit checked too. err is set when a word could not be corrected at
- * all, cor when one was repaired, so the UI can mark a report '*' (repaired) or
- * '!' (corrupt) after the direction. A word that cannot be corrected is not
- * dropped: its 20 bits are lost in place and show as '?', so the rest of the
- * report survives (soft erasure, upstream).
+ * BCH(31,21), generator feedback 873; two-bit correction (d = 5), the
+ * trailing even-parity bit checked too. err is set when a word could not be
+ * corrected at all, cor when one was repaired, so the UI can mark a report
+ * '*' (repaired) or '!' (corrupt) after the direction. A word that cannot be
+ * corrected is not dropped: its 20 bits are lost in place and show as '?', so
+ * the rest of the report survives (soft erasure, upstream).
  *
  * [deferred BCH] The sampler runs in a 19.2 kHz timer interrupt whose period is
  * 52 us, and a BCH search is far longer than that (up to 31 syndromes, ~160 us);
@@ -42,6 +42,10 @@ typedef struct {
 
 void lbj_rx_bit(lbj_rx_t *r, uint8_t bit);   /* ISR context: align + queue     */
 void lbj_process(lbj_rx_t *r);               /* main loop: BCH + state machine */
+
+/* Trial BCH decode for the bit-shift search: 0 clean, 1 repaired, 2 bad.
+ * `out` receives the corrected codeword (or the input when bad). */
+uint8_t lbj_bch_check(uint32_t cw, uint32_t *out);
 
 /* Provided by lbj_dual.c: one call per completed report. */
 void lbj_emit_msg(const lbj_rx_t *r, const char *bcd, uint16_t len);
