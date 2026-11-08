@@ -21,6 +21,7 @@
 #include "driver/keyboard.h"
 #include "driver/st7565.h"
 #include "driver/system.h"
+#include "driver/uart.h"
 #include "frequencies.h"
 #include "functions.h"
 #include "helper/battery.h"
@@ -484,6 +485,54 @@ bool LBJ_HandleKey(uint8_t key, bool pressed, bool held)
 
 /* ---- interrupts -------------------------------------------------------- */
 
+/* One line per batch on the 2.5 mm K-head UART (38400 8N1).  The 32 FIFO
+ * words are dumped raw, before rev16/inversion, so the PC can replay every
+ * shift, bit order and polarity offline. */
+static void lbj_dump_batch(void)
+{
+    static uint16_t lastSec = 0xFFFFu;
+    char line[48];
+    char *o;
+
+    /* One dump per second is enough for a capture and keeps the blocking
+     * UART send from stalling the main loop on noise batches. */
+    if (lastSec == g.sec)
+        return;
+    lastSec = g.sec;
+
+    o = line;
+    o = put(o, "LBJ C");
+    o = putu(o, g.cfg);
+    *o++ = ' ';
+    *o++ = "MLIJ"[g.order & 3u];
+    o = put(o, " S");
+    o = putu(o, g.shift);
+    o = put(o, " D");
+    o = putu(o, g.addrDist);
+    o = put(o, " IRQ");
+    o = puthex4(o, g.lastIrq);
+    o = put(o, " ST");
+    o = puthex4(o, g.status);
+    *o++ = '\r';
+    *o++ = '\n';
+    UART_Send(line, (uint32_t)(o - line));
+
+    for (uint8_t row = 0; row < 4u; row++) {
+        o = line;
+        *o++ = 'W';
+        *o++ = (char)('0' + row);
+        *o++ = ':';
+        *o++ = ' ';
+        for (uint8_t i = 0; i < 8u; i++) {
+            o = puthex4(o, g.raw[row * 8u + i]);
+            *o++ = ' ';
+        }
+        *o++ = '\r';
+        *o++ = '\n';
+        UART_Send(line, (uint32_t)(o - line));
+    }
+}
+
 void LBJ_HandleInterrupts(uint16_t bits)
 {
     if (!g.on)
@@ -559,6 +608,7 @@ void LBJ_HandleInterrupts(uint16_t bits)
 
         lbj_fsk_rearm();
         g.dirty = true;
+        lbj_dump_batch();
     }
 }
 
