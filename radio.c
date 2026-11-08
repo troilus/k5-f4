@@ -1067,7 +1067,10 @@ void RADIO_SetModulation(ModulationMode_t modulation)
 #endif
 #ifdef ENABLE_LBJ
     if (modulation == MODULATION_LBJ)
-        afcOff = true;      /* K1 LBJRadio RAW profile keeps AFC off */
+        afcOff = false;     /* the BK4819 FSK slicer needs the carrier
+                             * centred, exactly like TDCS.  The K1 RAW
+                             * profile's AFC-off setting was for the PA4
+                             * software demod, which has its own DC tracker. */
 #endif
     BK4819_SetRegValue(afcDisableRegSpec, afcOff);
 #else
