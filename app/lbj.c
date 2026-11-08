@@ -65,6 +65,7 @@ static struct {
     uint32_t lastFreq;
     uint8_t  cfg;        /* LBJ_CFG index                          */
     uint8_t  order;      /* 0 M, 1 L, 2 I, 3 J (bit 0 LSB, bit 1 inverted) */
+    uint8_t  shift;      /* last bit offset chosen by the BCH search */
     uint8_t  txState;    /* 0 idle, 1 sending, 2 sent, 3 denied    */
     uint16_t txTick;
 } g;
@@ -510,6 +511,7 @@ void LBJ_HandleInterrupts(uint16_t bits)
             words[n] = lsb ? rev16(g.raw[n]) : g.raw[n];
 
         const uint8_t shift = lbj_find_shift(words, inv);
+        g.shift = shift;
 
         /* Every batch starts with its own sync: reset the decoder so a
          * previous frame's half-finished state cannot leak into this one. */
@@ -622,6 +624,8 @@ void LBJ_Draw(void)
         o = put(o, "-------");
     o = put(o, " F");
     o = putu(o, g.frames);
+    o = put(o, " S");
+    o = putu(o, g.shift);
     *o = '\0';
     UI_PrintStringSmallNormal(s, 0, 0, 0);
 
