@@ -403,7 +403,7 @@ static void CMD_052D(const uint8_t *pBuffer)
 // session init, sends back version info and state
 // timestamp is a session id really
 // this command also disables dual watch, crossband, 
-// DTMF side tones, freq reverse, PTT ID, DTMF decoding, frequency offset
+// freq reverse, frequency offset
 // exits power save, sets main VFO to upper,
 static void CMD_052F(const uint8_t *pBuffer)
 {
@@ -412,15 +412,10 @@ static void CMD_052F(const uint8_t *pBuffer)
     gEeprom.DUAL_WATCH                               = DUAL_WATCH_OFF;
     gEeprom.CROSS_BAND_RX_TX                         = CROSS_BAND_OFF;
     gEeprom.RX_VFO                                   = 0;
-    gEeprom.DTMF_SIDE_TONE                           = false;
     gEeprom.VfoInfo[0].FrequencyReverse              = false;
     gEeprom.VfoInfo[0].pRX                           = &gEeprom.VfoInfo[0].freq_config_RX;
     gEeprom.VfoInfo[0].pTX                           = &gEeprom.VfoInfo[0].freq_config_TX;
     gEeprom.VfoInfo[0].TX_OFFSET_FREQUENCY_DIRECTION = TX_OFFSET_FREQUENCY_DIRECTION_OFF;
-    gEeprom.VfoInfo[0].DTMF_PTT_ID_TX_MODE           = PTT_ID_OFF;
-#ifdef ENABLE_DTMF_CALLING
-    gEeprom.VfoInfo[0].DTMF_DECODING_ENABLE          = false;
-#endif
 
     #ifdef ENABLE_NOAA
         gIsNoaaMode = false;

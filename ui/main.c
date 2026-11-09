@@ -18,7 +18,6 @@
 #include <stdlib.h>  // abs()
 
 #include "app/chFrScanner.h"
-#include "app/dtmf.h"
 #ifdef ENABLE_TDCS
     #include "app/tdcs.h"
 #endif
@@ -53,8 +52,6 @@ center_line_t center_line = CENTER_LINE_NONE;
     static int8_t RxBlinkLedCounter;
     static int8_t RxLine;
     static uint32_t RxOnVfofrequency;
-
-    bool isMainOnlyInputDTMF = false;
 
     static bool isMainOnly()
     {
@@ -204,9 +201,6 @@ void UI_DisplayAudioBar(void)
 
         if (gCurrentFunction != FUNCTION_TRANSMIT ||
             gScreenToDisplay != DISPLAY_MAIN
-#ifdef ENABLE_DTMF_CALLING
-            || gDTMF_CallState != DTMF_CALL_STATE_NONE
-#endif
             )
         {
             return;  // screen is in use
@@ -312,9 +306,6 @@ void DisplayRSSIBar(const bool now)
 
     if (gCurrentFunction == FUNCTION_TRANSMIT ||
         gScreenToDisplay != DISPLAY_MAIN
-#ifdef ENABLE_DTMF_CALLING
-        || gDTMF_CallState != DTMF_CALL_STATE_NONE
-#endif
         )
         return;     // display is in use
 
@@ -680,66 +671,6 @@ void UI_DisplayMain(void)
             }
 #endif
 
-
-            if (gDTMF_InputMode
-#ifdef ENABLE_DTMF_CALLING
-                || gDTMF_CallState != DTMF_CALL_STATE_NONE || gDTMF_IsTx
-#endif
-            ) {
-                char *pPrintStr = "";
-                // show DTMF stuff
-#ifdef ENABLE_DTMF_CALLING
-                char Contact[16];
-                if (!gDTMF_InputMode) {
-                    if (gDTMF_CallState == DTMF_CALL_STATE_CALL_OUT) {
-                        pPrintStr = DTMF_FindContact(gDTMF_String, Contact) ? Contact : gDTMF_String;
-                    } else if (gDTMF_CallState == DTMF_CALL_STATE_RECEIVED || gDTMF_CallState == DTMF_CALL_STATE_RECEIVED_STAY){
-                        pPrintStr = DTMF_FindContact(gDTMF_Callee, Contact) ? Contact : gDTMF_Callee;
-                    }else if (gDTMF_IsTx) {
-                        pPrintStr = gDTMF_String;
-                    }
-                }
-
-                UI_PrintString(pPrintStr, 2, 0, 2 + (vfo_num * 3), 8);
-
-                pPrintStr = "";
-                if (!gDTMF_InputMode) {
-                    if (gDTMF_CallState == DTMF_CALL_STATE_CALL_OUT) {
-                        pPrintStr = (gDTMF_State == DTMF_STATE_CALL_OUT_RSP) ? "CALL OUT(RSP)" : "CALL OUT";
-                    } else if (gDTMF_CallState == DTMF_CALL_STATE_RECEIVED || gDTMF_CallState == DTMF_CALL_STATE_RECEIVED_STAY) {
-                        sprintf(String, "CALL FRM:%s", (DTMF_FindContact(gDTMF_Caller, Contact)) ? Contact : gDTMF_Caller);
-                        pPrintStr = String;
-                    } else if (gDTMF_IsTx) {
-                        pPrintStr = (gDTMF_State == DTMF_STATE_TX_SUCC) ? "DTMF TX(SUCC)" : "DTMF TX";
-                    }
-                }
-                else
-#endif
-                {
-                    sprintf(String, ">%s", gDTMF_InputBox);
-                    pPrintStr = String;
-                }
-
-#ifdef ENABLE_FEAT_F4HWN
-                if (isMainOnly())
-                {
-                    UI_PrintString(pPrintStr, 2, 0, 5, 8);
-                    isMainOnlyInputDTMF = true;
-                    center_line = CENTER_LINE_IN_USE;
-                }
-                else
-                {
-                    UI_PrintString(pPrintStr, 2, 0, 0 + (vfo_num * 3), 8);
-                    isMainOnlyInputDTMF = false;
-                    center_line = CENTER_LINE_IN_USE;
-                    continue;
-                }
-#else
-                UI_PrintString(pPrintStr, 2, 0, 0 + (vfo_num * 3), 8);
-                center_line = CENTER_LINE_IN_USE;
-                continue;
-#endif
-            }
 
             // highlight the selected/used VFO with a marker
             if (isMainVFO)
@@ -1195,7 +1126,7 @@ void UI_DisplayMain(void)
             UI_PrintStringSmallNormal(s, LCD_WIDTH + 22, 0, line + 1);
             UI_PrintStringSmallNormal(t, LCD_WIDTH + 2, 0, line + 1);
 
-            if (isMainOnly() && !gDTMF_InputMode)
+            if (isMainOnly())
             {
                 if(shift == 0)
                 {
@@ -1365,12 +1296,6 @@ void UI_DisplayMain(void)
             UI_PrintStringSmallNormal("N", LCD_WIDTH + 70, 0, line + 1);
 #endif
 
-#ifdef ENABLE_DTMF_CALLING
-        // show the DTMF decoding symbol
-        if (vfoInfo->DTMF_DECODING_ENABLE || gSetting_KILLED)
-            UI_PrintStringSmallNormal("DTMF", LCD_WIDTH + 78, 0, line + 1);
-#endif
-
 #ifndef ENABLE_FEAT_F4HWN
         // show the audio scramble symbol
         if (vfoInfo->SCRAMBLING_TYPE > 0 && gSetting_ScrambleEnable)
@@ -1463,9 +1388,6 @@ if (!isMainOnly()) {
         if (rx && gEeprom.VfoInfo[gEeprom.RX_VFO].Modulation == MODULATION_AM && gSetting_AM_fix)
         {
             if (gScreenToDisplay != DISPLAY_MAIN
-#ifdef ENABLE_DTMF_CALLING
-                || gDTMF_CallState != DTMF_CALL_STATE_NONE
-#endif
                 )
                 return;
 
@@ -1485,60 +1407,10 @@ if (!isMainOnly()) {
 #endif
         if (rx || gCurrentFunction == FUNCTION_FOREGROUND || gCurrentFunction == FUNCTION_POWER_SAVE)
         {
-            #if 1
-                if (gSetting_live_DTMF_decoder && gDTMF_RX_live[0] != 0)
-                {   // show live DTMF decode
-                    const unsigned int len = strlen(gDTMF_RX_live);
-                    const unsigned int idx = (len > (17 - 5)) ? len - (17 - 5) : 0;  // limit to last 'n' chars
-
-                    if (gScreenToDisplay != DISPLAY_MAIN
-#ifdef ENABLE_DTMF_CALLING
-                        || gDTMF_CallState != DTMF_CALL_STATE_NONE
-#endif
-                        )
-                        return;
-
-                    center_line = CENTER_LINE_DTMF_DEC;
-
-                    sprintf(String, "DTMF %s", gDTMF_RX_live + idx);
-#ifdef ENABLE_FEAT_F4HWN
-                    if (isMainOnly())
-                    {
-                        UI_PrintStringSmallNormal(String, 2, 0, 5);
-                    }
-                    else
-                    {
-                        UI_PrintStringSmallNormal(String, 2, 0, 3);
-                    }
-#else
-                    UI_PrintStringSmallNormal(String, 2, 0, 3);
-
-#endif
-                }
-            #else
-                if (gSetting_live_DTMF_decoder && gDTMF_RX_index > 0)
-                {   // show live DTMF decode
-                    const unsigned int len = gDTMF_RX_index;
-                    const unsigned int idx = (len > (17 - 5)) ? len - (17 - 5) : 0;  // limit to last 'n' chars
-
-                    if (gScreenToDisplay != DISPLAY_MAIN ||
-                        gDTMF_CallState != DTMF_CALL_STATE_NONE)
-                        return;
-
-                    center_line = CENTER_LINE_DTMF_DEC;
-
-                    sprintf(String, "DTMF %s", gDTMF_RX_live + idx);
-                    UI_PrintStringSmallNormal(String, 2, 0, 3);
-                }
-            #endif
-
-#ifdef ENABLE_SHOW_CHARGE_LEVEL
-            else if (gChargingWithTypeC)
+            #ifdef ENABLE_SHOW_CHARGE_LEVEL
+            if (gChargingWithTypeC)
             {   // charging .. show the battery state
                 if (gScreenToDisplay != DISPLAY_MAIN
-#ifdef ENABLE_DTMF_CALLING
-                    || gDTMF_CallState != DTMF_CALL_STATE_NONE
-#endif
                     )
                     return;
 
@@ -1558,7 +1430,7 @@ if (!isMainOnly()) {
     //if(gEeprom.MENU_LOCK == false)
     //{
     //#endif
-    if (isMainOnly() && !gDTMF_InputMode)
+    if (isMainOnly())
     {
         sprintf(String, "VFO %s", activeTxVFO ? "B" : "A");
         UI_PrintStringSmallBold(String, 92, 0, 6);

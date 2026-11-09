@@ -41,7 +41,6 @@
 #endif
 
 #include "app/app.h"
-#include "app/dtmf.h"
 #include "bsp/dp32g030/gpio.h"
 #include "bsp/dp32g030/syscon.h"
 
@@ -96,9 +95,6 @@ void Main(void)
 #endif
 
     // Not implementing authentic device checks
-
-    memset(gDTMF_String, '-', sizeof(gDTMF_String));
-    gDTMF_String[sizeof(gDTMF_String) - 1] = 0;
 
     BK4819_Init();
 
