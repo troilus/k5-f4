@@ -84,13 +84,6 @@ void UI_DisplayStatus()
 
     unsigned int x1 = x;
 
-#ifdef ENABLE_DTMF_CALLING
-    if (gSetting_KILLED) {
-        memset(line + x, 0xFF, 10);
-        x1 = x + 10;
-    }
-    else
-#endif
     { // SCAN indicator
         if (gScanStateDir != SCAN_OFF || SCANNER_IsScanning()) {
             if (IS_MR_CHANNEL(gNextMrChannel) && !SCANNER_IsScanning()) { // channel mode

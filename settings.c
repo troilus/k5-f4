@@ -16,7 +16,6 @@
 
 #include <string.h>
 
-#include "app/dtmf.h"
 #ifdef ENABLE_FMRADIO
     #include "app/fm.h"
 #endif
@@ -181,67 +180,9 @@ void SETTINGS_InitEEPROM(void)
 
     // 0ED0..0ED7
     EEPROM_ReadBuffer(0x0ED0, Data, 8);
-    gEeprom.DTMF_SIDE_TONE               = (Data[0] <   2) ? Data[0] : true;
-
-#ifdef ENABLE_DTMF_CALLING
-    gEeprom.DTMF_SEPARATE_CODE           = DTMF_ValidateCodes((char *)(Data + 1), 1) ? Data[1] : '*';
-    gEeprom.DTMF_GROUP_CALL_CODE         = DTMF_ValidateCodes((char *)(Data + 2), 1) ? Data[2] : '#';
-    gEeprom.DTMF_DECODE_RESPONSE         = (Data[3] <   4) ? Data[3] : 0;
-    gEeprom.DTMF_auto_reset_time         = (Data[4] <  61) ? Data[4] : (Data[4] >= 5) ? Data[4] : 10;
-#endif
-    gEeprom.DTMF_PRELOAD_TIME            = (Data[5] < 101) ? Data[5] * 10 : 300;
-    gEeprom.DTMF_FIRST_CODE_PERSIST_TIME = (Data[6] < 101) ? Data[6] * 10 : 100;
-    gEeprom.DTMF_HASH_CODE_PERSIST_TIME  = (Data[7] < 101) ? Data[7] * 10 : 100;
 
     // 0ED8..0EDF
     EEPROM_ReadBuffer(0x0ED8, Data, 8);
-    gEeprom.DTMF_CODE_PERSIST_TIME  = (Data[0] < 101) ? Data[0] * 10 : 100;
-    gEeprom.DTMF_CODE_INTERVAL_TIME = (Data[1] < 101) ? Data[1] * 10 : 100;
-#ifdef ENABLE_DTMF_CALLING
-    gEeprom.PERMIT_REMOTE_KILL      = (Data[2] <   2) ? Data[2] : true;
-
-    // 0EE0..0EE7
-
-    EEPROM_ReadBuffer(0x0EE0, Data, sizeof(gEeprom.ANI_DTMF_ID));
-    if (DTMF_ValidateCodes((char *)Data, sizeof(gEeprom.ANI_DTMF_ID))) {
-        memcpy(gEeprom.ANI_DTMF_ID, Data, sizeof(gEeprom.ANI_DTMF_ID));
-    } else {
-        strcpy(gEeprom.ANI_DTMF_ID, "123");
-    }
-
-
-    // 0EE8..0EEF
-    EEPROM_ReadBuffer(0x0EE8, Data, sizeof(gEeprom.KILL_CODE));
-    if (DTMF_ValidateCodes((char *)Data, sizeof(gEeprom.KILL_CODE))) {
-        memcpy(gEeprom.KILL_CODE, Data, sizeof(gEeprom.KILL_CODE));
-    } else {
-        strcpy(gEeprom.KILL_CODE, "ABCD9");
-    }
-
-    // 0EF0..0EF7
-    EEPROM_ReadBuffer(0x0EF0, Data, sizeof(gEeprom.REVIVE_CODE));
-    if (DTMF_ValidateCodes((char *)Data, sizeof(gEeprom.REVIVE_CODE))) {
-        memcpy(gEeprom.REVIVE_CODE, Data, sizeof(gEeprom.REVIVE_CODE));
-    } else {
-        strcpy(gEeprom.REVIVE_CODE, "9DCBA");
-    }
-#endif
-
-    // 0EF8..0F07
-    EEPROM_ReadBuffer(0x0EF8, Data, sizeof(gEeprom.DTMF_UP_CODE));
-    if (DTMF_ValidateCodes((char *)Data, sizeof(gEeprom.DTMF_UP_CODE))) {
-        memcpy(gEeprom.DTMF_UP_CODE, Data, sizeof(gEeprom.DTMF_UP_CODE));
-    } else {
-        strcpy(gEeprom.DTMF_UP_CODE, "12345");
-    }
-
-    // 0F08..0F17
-    EEPROM_ReadBuffer(0x0F08, Data, sizeof(gEeprom.DTMF_DOWN_CODE));
-    if (DTMF_ValidateCodes((char *)Data, sizeof(gEeprom.DTMF_DOWN_CODE))) {
-        memcpy(gEeprom.DTMF_DOWN_CODE, Data, sizeof(gEeprom.DTMF_DOWN_CODE));
-    } else {
-        strcpy(gEeprom.DTMF_DOWN_CODE, "54321");
-    }
 
     // 0F18..0F1F
     EEPROM_ReadBuffer(0x0F18, Data, 8);
@@ -282,9 +223,6 @@ void SETTINGS_InitEEPROM(void)
 #ifndef ENABLE_FEAT_F4HWN
     gSetting_350TX             = (Data[1] < 2) ? Data[1] : false;  // was true
 #endif
-#ifdef ENABLE_DTMF_CALLING
-    gSetting_KILLED            = (Data[2] < 2) ? Data[2] : false;
-#endif
 #ifndef ENABLE_FEAT_F4HWN
     gSetting_200TX             = (Data[3] < 2) ? Data[3] : false;
     gSetting_500TX             = (Data[4] < 2) ? Data[4] : false;
@@ -297,7 +235,6 @@ void SETTINGS_InitEEPROM(void)
 #endif
 
     //gSetting_TX_EN             = (Data[7] & (1u << 0)) ? true : false;
-    gSetting_live_DTMF_decoder = !!(Data[7] & (1u << 1));
     gSetting_battery_text      = (((Data[7] >> 2) & 3u) <= 2) ? (Data[7] >> 2) & 3 : 2;
     #ifdef ENABLE_AUDIO_BAR
         gSetting_mic_bar       = !!(Data[7] & (1u << 4));
@@ -503,9 +440,9 @@ void SETTINGS_FactoryReset(bool bIsAll)
     for (i = 0x0000; i < 0x1E00; i += 8)
     {
         if (
-            !(i >= 0x0EE0 && i < 0x0F18) &&         // ANI ID + DTMF codes
+            !(i >= 0x0EE0 && i < 0x0F18) &&         // reserved (old DTMF)
             !(i >= 0x0F30 && i < 0x0F50) &&         // AES KEY + F LOCK + Scramble Enable
-            !(i >= 0x1C00 && i < 0x1E00) &&         // DTMF contacts
+            !(i >= 0x1C00 && i < 0x1E00) &&         // reserved (old DTMF contacts)
             !(i >= 0x0EB0 && i < 0x0ED0) &&         // Welcome strings
             !(i >= 0x0EA0 && i < 0x0EA8) &&         // Voice Prompt
             (bIsAll ||
@@ -703,24 +640,9 @@ void SETTINGS_SaveSettings(void)
     State[4] = gEeprom.BATTERY_TYPE;
     EEPROM_WriteBuffer(0x0EA8, State);
 
-    State[0] = gEeprom.DTMF_SIDE_TONE;
-#ifdef ENABLE_DTMF_CALLING
-    State[1] = gEeprom.DTMF_SEPARATE_CODE;
-    State[2] = gEeprom.DTMF_GROUP_CALL_CODE;
-    State[3] = gEeprom.DTMF_DECODE_RESPONSE;
-    State[4] = gEeprom.DTMF_auto_reset_time;
-#endif
-    State[5] = gEeprom.DTMF_PRELOAD_TIME / 10U;
-    State[6] = gEeprom.DTMF_FIRST_CODE_PERSIST_TIME / 10U;
-    State[7] = gEeprom.DTMF_HASH_CODE_PERSIST_TIME / 10U;
     EEPROM_WriteBuffer(0x0ED0, State);
 
     memset(State, 0xFF, sizeof(State));
-    State[0] = gEeprom.DTMF_CODE_PERSIST_TIME / 10U;
-    State[1] = gEeprom.DTMF_CODE_INTERVAL_TIME / 10U;
-#ifdef ENABLE_DTMF_CALLING
-    State[2] = gEeprom.PERMIT_REMOTE_KILL;
-#endif
     EEPROM_WriteBuffer(0x0ED8, State);
 
     State[0] = gEeprom.SCAN_LIST_DEFAULT;
@@ -748,9 +670,6 @@ void SETTINGS_SaveSettings(void)
 #ifndef ENABLE_FEAT_F4HWN
     State[1]  = gSetting_350TX;
 #endif
-#ifdef ENABLE_DTMF_CALLING
-    State[2]  = gSetting_KILLED;
-#endif
 #ifndef ENABLE_FEAT_F4HWN
     State[3]  = gSetting_200TX;
     State[4]  = gSetting_500TX;
@@ -763,7 +682,6 @@ void SETTINGS_SaveSettings(void)
 #endif
 
     //if (!gSetting_TX_EN)             State[7] &= ~(1u << 0);
-    if (!gSetting_live_DTMF_decoder) State[7] &= ~(1u << 1);
     State[7] = (State[7] & ~(3u << 2)) | ((gSetting_battery_text & 3u) << 2);
     #ifdef ENABLE_AUDIO_BAR
         if (!gSetting_mic_bar)           State[7] &= ~(1u << 4);
@@ -861,11 +779,7 @@ void SETTINGS_SaveChannel(uint8_t Channel, uint8_t VFO, const VFO_Info_t *pVFO, 
             | (pVFO->OUTPUT_POWER      << 2)
             | (pVFO->CHANNEL_BANDWIDTH << 1)
             | (pVFO->FrequencyReverse  << 0);
-        State._8[5] = ((pVFO->DTMF_PTT_ID_TX_MODE & 7u) << 1)
-#ifdef ENABLE_DTMF_CALLING
-            | ((pVFO->DTMF_DECODING_ENABLE & 1u) << 0)
-#endif
-        ;
+        State._8[5] = 0;
         State._8[6] =  pVFO->STEP_SETTING;
 #ifdef ENABLE_FEAT_F4HWN
         State._8[7] =  0;
@@ -988,9 +902,6 @@ State[0] = 0
 #endif
 #ifdef ENABLE_PWRON_PASSWORD
     | (1 << 6)
-#endif
-#ifdef ENABLE_DTMF_CALLING
-    | (1 << 7)
 #endif
 ;
 

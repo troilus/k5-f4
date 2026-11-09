@@ -188,6 +188,137 @@ static const char *sig_type_name(uint8_t v)
     }
 }
 
+/* Locomotive model code -> ASCII name.  Same table as the K1 TDCS/LBJ
+ * decoder (App/app/lbj_dual.c).  TDCS carries the type in one byte, so the
+ * K1 entries above 255 (CRH/CR registrations) can never appear here. */
+static const char *loco_type_name(uint8_t c)
+{
+    switch (c) {
+        case   1: return "JF";
+        case   3: return "QJ";
+        case   5: return "JS";
+        case   6: return "KD7";
+        case  55: return "LJK";
+        case  81: return "DF21";
+        case 101: return "DF";
+        case 102: return "DF2";
+        case 103: return "DF3";
+        case 104: return "DF4";
+        case 105: return "DF4K";
+        case 106: return "DF4C";
+        case 107: return "DF5";
+        case 108: return "DF5W";
+        case 109: return "DF6";
+        case 110: return "DF7";
+        case 111: return "DF8";
+        case 112: return "DF9";
+        case 113: return "DF10";
+        case 114: return "DFH1";
+        case 115: return "DFH2";
+        case 116: return "DFH3";
+        case 117: return "DFH5";
+        case 118: return "BJ";
+        case 119: return "BJW";
+        case 120: return "ND2";
+        case 121: return "ND3";
+        case 122: return "ND4";
+        case 123: return "ND5";
+        case 124: return "NY5";
+        case 125: return "NY6";
+        case 126: return "NY7";
+        case 127: return "QY";
+        case 128: return "DFH21";
+        case 129: return "DF7B";
+        case 130: return "DF5S";
+        case 131: return "DF7C";
+        case 132: return "DF7S";
+        case 133: return "GK1";
+        case 134: return "GK1F";
+        case 135: return "DF4E";
+        case 136: return "DF7D";
+        case 137: return "GK1A";
+        case 138: return "DF11";
+        case 139: return "TA";
+        case 140: return "DF10F";
+        case 141: return "DF4D";
+        case 142: return "DF8B";
+        case 143: return "DF12";
+        case 144: return "DF7E";
+        case 145: return "NYJ1";
+        case 146: return "NZJ1";
+        case 147: return "NZJ2";
+        case 148: return "DF4DJ";
+        case 149: return "XSG";
+        case 150: return "SZ";
+        case 151: return "NJ2";
+        case 152: return "DF7G";
+        case 153: return "NDJ3";
+        case 156: return "DF11Z";
+        case 157: return "FXN3D";
+        case 158: return "DF11G";
+        case 160: return "HXN3";
+        case 161: return "HXN5";
+        case 162: return "HXN3B";
+        case 163: return "HXN5B";
+        case 167: return "FXN3B";
+        case 169: return "FXN3C";
+        case 170: return "FXN5C";
+        case 171: return "FXN3-J";
+        case 201: return "8G";
+        case 202: return "8K";
+        case 203: return "6G";
+        case 204: return "6K";
+        case 205: return "SS1";
+        case 206: return "SS3";
+        case 207: return "SS4";
+        case 208: return "SS5";
+        case 209: return "SS6";
+        case 210: return "SS3B";
+        case 211: return "SS7";
+        case 212: return "SS8";
+        case 213: return "SS7B";
+        case 214: return "SS7C";
+        case 215: return "SS6B";
+        case 216: return "SS9";
+        case 217: return "SS7D";
+        case 218: return "DJXM";
+        case 219: return "DJ1";
+        case 220: return "DJ2";
+        case 221: return "DJF";
+        case 222: return "LJD";
+        case 223: return "XFH";
+        case 224: return "SS7E";
+        case 225: return "SS4G";
+        case 226: return "SS3C";
+        case 228: return "TS";
+        case 229: return "DJ4HX";
+        case 230: return "KTT";
+        case 231: return "HXD1";
+        case 232: return "HXD2";
+        case 233: return "HXD3";
+        case 234: return "HXD1B";
+        case 235: return "HXD2B";
+        case 236: return "HXD3B";
+        case 237: return "HXD1C";
+        case 238: return "HXD2C";
+        case 239: return "HXD3C";
+        case 240: return "HXD1D";
+        case 241: return "HXD2D";
+        case 242: return "HXD3D";
+        case 243: return "FXD1B";
+        case 244: return "FXD2B";
+        case 245: return "FXD1";
+        case 246: return "FXD3";
+        case 247: return "FXD1-J";
+        case 248: return "FXD3-J";
+        case 249: return "KZ25TA";
+        case 251: return "KZ25TB";
+        case 252: return "HXD1D-J";
+        case 254: return "FXD1H";
+        default:  return 0;
+    }
+}
+
 /* Short labels: an 8x8 Chinese glyph advances 9 px, so a four-character label
  * with ": " still leaves most of the 128 px row for the value. */
 static const char *const TDCS_LABEL[TDCS_FIELDS] = {
@@ -280,15 +411,29 @@ static void draw_field(uint8_t row, const tdcs_rec_t *r, uint8_t idx)
                 field_row(row, TDCS_LABEL[idx], v);
             }
             break;
-        case 5:
+        case 5: {
+            /* The type byte uses the LBJ model code space (240 is HXD1D).
+             * Show the name with the raw code in hex; a seven-character
+             * name drops the hex so the row stays inside 128 px. */
+            const char *n = loco_type_name(m->loco_type);
             o = v;
-            o = putu(o, m->loco_type);
-            o = put(o, " (");
-            o = puthex2(o, m->loco_type);
-            *o++ = ')';
+            if (n) {
+                o = put(o, n);
+                if (o - v <= 6) {
+                    *o++ = '(';
+                    o = puthex2(o, m->loco_type);
+                    *o++ = ')';
+                }
+            } else {
+                o = putu(o, m->loco_type);
+                o = put(o, " (");
+                o = puthex2(o, m->loco_type);
+                *o++ = ')';
+            }
             *o = '\0';
             field_row(row, TDCS_LABEL[idx], v);
             break;
+        }
         case 6:
             o = putu(v, m->loco_ext);
             *o = '\0';

@@ -16,7 +16,6 @@
 
 #include <string.h>
 
-#include "app/dtmf.h"
 #if defined(ENABLE_FMRADIO)
     #include "app/fm.h"
 #endif
@@ -71,10 +70,6 @@ void FUNCTION_Init(void)
     g_VOX_Lost     = false;
 #endif
 
-#ifdef ENABLE_DTMF_CALLING
-    DTMF_clear_RX();
-#endif
-
 #ifdef ENABLE_NOAA
     gNOAACountdown_10ms = 0;
 
@@ -88,11 +83,6 @@ void FUNCTION_Init(void)
 
 void FUNCTION_Foreground(const FUNCTION_Type_t PreviousFunction)
 {
-#ifdef ENABLE_DTMF_CALLING
-    if (gDTMF_ReplyState != DTMF_REPLY_NONE)
-        RADIO_PrepareCssTX();
-#endif
-
     if (PreviousFunction == FUNCTION_TRANSMIT) {
         ST7565_FixInterfGlitch();
         gVFO_RSSI_bar_level[0] = 0;
@@ -106,14 +96,6 @@ void FUNCTION_Foreground(const FUNCTION_Type_t PreviousFunction)
         gFM_RestoreCountdown_10ms = fm_restore_countdown_10ms;
 #endif
 
-#ifdef ENABLE_DTMF_CALLING
-    if (gDTMF_CallState == DTMF_CALL_STATE_CALL_OUT ||
-        gDTMF_CallState == DTMF_CALL_STATE_RECEIVED ||
-        gDTMF_CallState == DTMF_CALL_STATE_RECEIVED_STAY)
-    {
-        gDTMF_auto_reset_time_500ms = gEeprom.DTMF_auto_reset_time * 2;
-    }
-#endif
     gUpdateStatus = true;
 }
 
@@ -149,18 +131,6 @@ void FUNCTION_PowerSave() {
 
 void FUNCTION_Transmit()
 {
-    // if DTMF is enabled when TX'ing, it changes the TX audio filtering !! .. 1of11
-    BK4819_DisableDTMF();
-
-#ifdef ENABLE_DTMF_CALLING
-    // clear the DTMF RX buffer
-    DTMF_clear_RX();
-#endif
-
-    // clear the DTMF RX live decoder buffer
-    gDTMF_RX_live_timeout = 0;
-    memset(gDTMF_RX_live, 0, sizeof(gDTMF_RX_live));
-
 #if defined(ENABLE_FMRADIO)
     if (gFmRadioMode)
         BK1080_Init0();
@@ -197,11 +167,6 @@ void FUNCTION_Transmit()
 
     // turn the RED LED on
     BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);
-
-    DTMF_Reply();
-
-    if (gCurrentVfo->DTMF_PTT_ID_TX_MODE == PTT_ID_APOLLO)
-        BK4819_PlaySingleTone(2525, 250, 0, gEeprom.DTMF_SIDE_TONE);
 
 #if defined(ENABLE_ALARM) || defined(ENABLE_TX1750)
     if (gAlarmState != ALARM_STATE_OFF) {
