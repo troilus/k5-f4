@@ -25,6 +25,68 @@ classic UV-K5 without a K1, a PC, or an external module.
 - Next step: **PA9 audio tap + K1 software demod** (low-pass, matched filter,
   adaptive threshold, DPLL). Not implemented yet.
 
+## Attempts so far
+
+The TDCS receiver on this firmware already decodes real signals through the
+BK4819 FSK engine, so LBJ started from the same path:
+
+- **BK4819 direct-FSK 1.2K engine** with the losehu MDC1200 RX recipe
+  (`REG_58=0x3F03`, `REG_5C=0x5625`), POCSAG sync in `REG_5A/5B`, 64-byte
+  payload in `REG_5D`, one-word FIFO threshold in `REG_5E`.
+- **Eight RX front-end profiles (C0-C7)**: AirCopy values, TDCS clock
+  recovery, Roger MDC RX gain, CRC on/off, FSK level variants, and the C7
+  POCSAG P front end. `UP`/`DOWN` cycles them on air.
+- **AFC enabled** for the FSK slicer.
+- **MSB/LSB FIFO order** and **inverted polarity** (`M/L/I/J`).
+- **Full RX re-arm per batch**.
+- **Decoder hardening**: 2-bit BCH(31,21), sync tolerance 3, 0..31 bit-shift
+  search, known-address Hamming distance, short-block buffer.
+- **Raw FIFO dump** on the K-head UART for offline replay.
+- **Offline IQ analysis** with K1 `model_rx.py` on two real recordings.
+
+## Problems found
+
+- The signal is valid: carrier -12.42 kHz (SDR offset), deviation about
+  +/-2.3 kHz, baud about 1200.75, DC about -200 Hz.
+- K1's integer demodulator decodes both recordings with **16/16 clean
+  codewords, 0 errors** after mixing to baseband, low-pass filtering and FM
+  demodulation. Decimating the -12.5 kHz-centred signal directly corrupts the
+  demodulation.
+- The K5 raw FIFO shows sync distances **D4-D8** (mostly D6-D7) and address
+  distances **D5-D7**. A real address needs **D0-D2**.
+- The errors are uniform: 47-48% ones, 0.5 transitions/bit, longest run
+  8-13 bits. This rules out polarity, bit order, framing and a gross
+  frequency offset.
+- Fixed-threshold slicing gives about **15-16 errors per 32 bits**; the K1
+  chain (1500 Hz low-pass, 16-sample matched filter, adaptive peak/valley
+  threshold, DPLL) gives 0. The BK4819 hardware slicer has none of those.
+- Register attempts (`REG_43`, `REG_5C`, `REG_58`, `REG_70`, `REG_59`,
+  `REG_5D`, `REG_5E`, `REG_2B`, `REG_7E`, `REG_4B`, C1 clock recovery, C7
+  P front end) did not get below the ~19% BER.
+- The C7 profile produced repeating `2BDC F2B1` / `57B8 E563` words, i.e.
+  garbage, not a better slice.
+- Known code bug: when `addrDist > 2`, `app/lbj.c` forces the displayed
+  `shift` to 0 instead of keeping the measured best shift.
+
+## Why it is blocked
+
+The BK4819 FSK engine has a fixed hardware slicer: no matched filter, no
+adaptive threshold and no DPLL. This signal's +/-2.3 kHz deviation leaves too
+little margin at the slicer, so every codeword arrives with 6-7 bit errors and
+2-bit BCH cannot recover it. More register tuning cannot add those DSP blocks.
+
+The only remaining K5-only path is to AC-couple the BK4819 AF output
+(U4 LM4890 `IN+`) to PA9/ADC_CH4 through a 100 nF capacitor and run the K1
+`pa4_sampler.c` + `lbj_dual.c` software demodulator on the MCU, reusing
+`lbj_dec`. That requires opening the radio and soldering; it is not implemented.
+
+## Flash budget
+
+- Current LBJ build: **59068 bytes**, about **2.3 KiB free**.
+- TDCS and LBJ do not fit together.
+- The PA9 sampler + software demod needs roughly 4-6 KiB, so a dedicated LBJ
+  build would have to disable FM radio and UART.
+
 ## Build
 
 ```bash
