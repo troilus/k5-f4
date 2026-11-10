@@ -241,8 +241,13 @@ OBJCOPY = arm-none-eabi-objcopy
 SIZE = arm-none-eabi-size
 
 ifeq ($(ENABLE_FEAT_F4HWN),1)
+ifeq ($(ENABLE_LBJ),1)
+	AUTHOR_STRING_1 ?= LBJ
+	VERSION_STRING_1 ?= v1.0.3
+else
 	AUTHOR_STRING_1 ?= TDCS
-	VERSION_STRING_1 ?= v1.0
+	VERSION_STRING_1 ?= v1.0.3
+endif
 
 	EDITION_STRING ?= Custom
 

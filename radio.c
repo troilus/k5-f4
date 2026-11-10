@@ -22,6 +22,9 @@
 #ifdef ENABLE_TDCS
     #include "app/tdcs.h"
 #endif
+#ifdef ENABLE_LBJ
+    #include "app/lbj.h"
+#endif
 #ifdef ENABLE_FMRADIO
     #include "app/fm.h"
 #endif
@@ -168,6 +171,12 @@ void RADIO_InitInfo(VFO_Info_t *pInfo, const uint8_t ChannelSave, const uint32_t
 
 void RADIO_ConfigureChannel(const unsigned int VFO, const unsigned int configure)
 {
+#ifdef ENABLE_LBJ
+    /* Never reconfigure the receiver underneath the LBJ FSK engine: its
+     * REG_58/5A..5E/43 setup would be overwritten mid-batch. */
+    LBJ_StopSampler();
+#endif
+
     VFO_Info_t *pVfo = &gEeprom.VfoInfo[VFO];
 
     if (!gSetting_350EN) {
@@ -693,6 +702,10 @@ void RADIO_SelectVfos(void)
 
 void RADIO_SetupRegisters(bool switchToForeground)
 {
+#ifdef ENABLE_LBJ
+    LBJ_StopSampler();
+#endif
+
     BK4819_FilterBandwidth_t Bandwidth = gRxVfo->CHANNEL_BANDWIDTH;
 
     #ifdef ENABLE_FEAT_F4HWN_NARROWER
@@ -1001,6 +1014,11 @@ void RADIO_SetTxParameters(void)
 
 void RADIO_SetModulation(ModulationMode_t modulation)
 {
+#ifdef ENABLE_LBJ
+    /* LBJ shares the FSK engine with the modulation switch; stop it before
+     * the AF/FSK registers are rewritten. */
+    LBJ_StopSampler();
+#endif
 #ifdef ENABLE_TDCS
     /* The FSK engine owns REG_58/59/5A..5E; stop it before reconfiguring the
      * receiver so its interrupt mask and FIFO are restored while current. */

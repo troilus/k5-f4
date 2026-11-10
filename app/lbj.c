@@ -68,29 +68,34 @@ static struct {
     uint8_t  order;      /* 0 M, 1 L, 2 I, 3 J (bit 0 LSB, bit 1 inverted) */
     uint8_t  shift;      /* bit offset of the closest known address */
     uint8_t  addrDist;   /* Hamming distance to that address word   */
+    uint16_t lostTicks;  /* 10 ms ticks the squelch has been closed */
     uint8_t  txState;    /* 0 idle, 1 sending, 2 sent, 3 denied    */
     uint16_t txTick;
 } g;
 
 /* RX tuning table.  The real LBJ signal does not decode with the AirCopy
  * values, so UP/DOWN cycles these on air.  REG_72 (1200 baud), REG_5A/5B
- * (POCSAG sync), REG_5D (64-byte payload) and REG_5E stay fixed. */
+ * (POCSAG sync), REG_5D (64-byte payload) and REG_5E stay fixed.
+ * reg43 is the RF/IF filter: 0x3628 = 25 kHz, 0x3648 = 12.5 kHz, and the
+ * POCSAG P profile keeps its 7.5 kHz RF / 12.5 kHz IF value. */
 typedef struct {
     uint16_t reg58;
     uint16_t reg5c;
     uint16_t reg70;
+    uint16_t reg43;
     uint8_t  flags;      /* 1 = POCSAG P front end (C7) */
 } lbj_cfg_t;
 
 static const lbj_cfg_t LBJ_CFG[] = {
-    { 0x00C1u, 0xAA30u, 0x00E0u, 0u },   /* 0: current AirCopy values      */
-    { 0x00C1u, 0x5625u, 0x00E0u, 0u },   /* 1: TDCS real-signal clock rec. */
-    { 0x37C3u, 0xAA30u, 0x00E0u, 0u },   /* 2: Roger MDC RX, gain 11       */
-    { 0x37C3u, 0x5625u, 0x00E0u, 0u },   /* 3: combination                 */
-    { 0x00C3u, 0x5625u, 0x00E0u, 0u },   /* 4: RX mode variant             */
-    { 0x00C1u, 0x5665u, 0x00E0u, 0u },   /* 5: CRC on, other clock rec.    */
-    { 0x00C1u, 0x5625u, 0x00C3u, 0u },   /* 6: FSK level variant           */
-    { 0x03C1u, 0x5625u, 0x0000u, 1u },   /* 7: POCSAG P front end          */
+    { 0x00C1u, 0xAA30u, 0x00E0u, 0x3628u, 0u },  /* 0: current AirCopy values   */
+    { 0x00C1u, 0x5625u, 0x00E0u, 0x3628u, 0u },  /* 1: TDCS real-signal clock   */
+    { 0x37C3u, 0xAA30u, 0x00E0u, 0x3628u, 0u },  /* 2: Roger MDC RX, gain 11    */
+    { 0x37C3u, 0x5625u, 0x00E0u, 0x3628u, 0u },  /* 3: combination              */
+    { 0x00C3u, 0x5625u, 0x00E0u, 0x3628u, 0u },  /* 4: RX mode variant          */
+    { 0x00C1u, 0x5665u, 0x00E0u, 0x3628u, 0u },  /* 5: CRC on, other clock rec. */
+    { 0x00C1u, 0x5625u, 0x00C3u, 0x3628u, 0u },  /* 6: FSK level variant        */
+    { 0x03C1u, 0x5625u, 0x0000u, 0x47A8u, 1u },  /* 7: POCSAG P front end       */
+    { 0x00C1u, 0x5625u, 0x00E0u, 0x3648u, 0u },  /* 8: narrow IF, 12.5 kHz      */
 };
 
 #define LBJ_CFG_COUNT ((uint8_t)(sizeof(LBJ_CFG) / sizeof(LBJ_CFG[0])))
@@ -233,7 +238,7 @@ static void lbj_apply_frontend(const lbj_cfg_t *c)
 
     BK4819_WriteRegister(BK4819_REG_5D, p ? 0x4000u : 0x3F00u);
     BK4819_WriteRegister(BK4819_REG_5E, p ? 0x0204u : 0x0201u);
-    BK4819_WriteRegister(BK4819_REG_43, p ? 0x47A8u : 0x3628u);
+    BK4819_WriteRegister(BK4819_REG_43, c->reg43);
     BK4819_WriteRegister(BK4819_REG_3D, 0x2AABu);
 
     uint16_t reg2b = BK4819_ReadRegister(BK4819_REG_2B);
@@ -297,10 +302,18 @@ static void lbj_start(void)
     g.lastFreq = gRxVfo->pRX->Frequency;
 }
 
+static uint8_t lbj_decode_batch(uint8_t nwords, bool complete);
+
 void LBJ_StopSampler(void)
 {
     if (!g.on)
         return;
+
+    /* Drain what the engine already handed over.  A PTT, a channel change or
+     * a squelch close can land in the last codewords of a batch, and then the
+     * hardware re-arm never runs: decode the complete codewords we have so the
+     * report is not lost.  No re-arm and no dump on this path. */
+    lbj_decode_batch(g.fill, false);
 
     g.on = false;
 
@@ -553,6 +566,79 @@ static void lbj_dump_batch(void)
     }
 }
 
+/* Decode the words collected in g.raw.  `complete` means the engine reported
+ * the end of the batch: the raw words are shown, the batch counter advances,
+ * the engine is re-armed and the capture is dumped.  A stop-time flush passes
+ * complete=false so it only decodes what already arrived. */
+static uint8_t lbj_decode_batch(uint8_t nwords, bool complete)
+{
+    if (nwords < 2u)
+        return 0u;
+
+    const bool lsb = (g.order & 1u) != 0u;
+    const bool inv = (g.order & 2u) != 0u;
+
+    /* Rebuild the batch in air order, then let the BCH score all 32 bit
+     * offsets.  The hardware sync can be one or more bits away from the real
+     * codeword boundary; without this search a one-bit offset turns every
+     * codeword into garbage. */
+    uint16_t words[LBJ_BATCH_WORDS];
+    for (uint8_t n = 0; n < nwords; n++)
+        words[n] = lsb ? rev16(g.raw[n]) : g.raw[n];
+    for (uint8_t n = nwords; n < LBJ_BATCH_WORDS; n++)
+        words[n] = 0u;      /* do not score the previous batch's tail */
+
+    uint8_t measuredShift = 0u;
+    const uint8_t addrDist = lbj_measure_addr(words, inv, &measuredShift);
+
+    g.addrDist = addrDist;
+    g.shift    = measuredShift;
+
+    /* Decode at the shift the address measurement chose, so the S<shift> on
+     * screen is what the decoder actually used.  A noise-only batch is
+     * rejected by the BCH either way. */
+    const uint8_t shift = measuredShift;
+
+    /* Every batch starts with its own sync: reset the decoder so a previous
+     * frame's half-finished state cannot leak into this one. */
+    memset(&g.rx, 0, sizeof(g.rx));
+
+    /* Prepend the POCSAG sync.  For an inverted signal, prepend the inverted
+     * sync: lbj_dec then sets pol=0 and inverts every queued codeword back to
+     * normal.  (Prepending the normal sync would pin the decoder to pol=1 and
+     * make inverted signals undecodable.) */
+    const uint32_t sync = inv ? ~POCSAG_SYNC : POCSAG_SYNC;
+    for (int b = 31; b >= 0; b--)
+        lbj_rx_bit(&g.rx, (uint8_t)((sync >> b) & 1u));
+    lbj_process(&g.rx);
+
+    const uint8_t ncodewords = (uint8_t)(nwords / 2u);
+    for (uint8_t j = 0; j < ncodewords; j++) {
+        const uint16_t start = (uint16_t)(shift + j * 32u);
+
+        for (uint8_t b = 0; b < 32u; b++) {
+            const uint16_t i = (uint16_t)(start + b);
+            const uint8_t bit =
+                i < LBJ_BATCH_BITS ? lbj_payload_bit(words, i) : 0u;
+            lbj_rx_bit(&g.rx, bit);
+        }
+        lbj_process(&g.rx);
+    }
+
+    g.fill = 0;
+
+    if (complete) {
+        g.rawCount = LBJ_BATCH_WORDS;
+        g.frames++;
+
+        lbj_fsk_rearm();
+        g.dirty = true;
+        lbj_dump_batch();
+    }
+
+    return ncodewords;
+}
+
 void LBJ_HandleInterrupts(uint16_t bits)
 {
     if (!g.on)
@@ -575,60 +661,7 @@ void LBJ_HandleInterrupts(uint16_t bits)
         while (g.fill < LBJ_BATCH_WORDS)
             g.raw[g.fill++] = BK4819_ReadRegister(BK4819_REG_5F);
 
-        const bool lsb = (g.order & 1u) != 0u;
-        const bool inv = (g.order & 2u) != 0u;
-
-        /* Rebuild the 512-bit batch in air order, then let the BCH score all
-         * 32 bit offsets.  The hardware sync can be one or more bits away
-         * from the real codeword boundary; without this search a one-bit
-         * offset turns every codeword into garbage. */
-        uint16_t words[LBJ_BATCH_WORDS];
-        for (uint8_t n = 0; n < LBJ_BATCH_WORDS; n++)
-            words[n] = lsb ? rev16(g.raw[n]) : g.raw[n];
-
-        uint8_t measuredShift = 0u;
-        const uint8_t addrDist = lbj_measure_addr(words, inv, &measuredShift);
-
-        g.addrDist = addrDist;
-        g.shift    = measuredShift;
-
-        /* Only trust the measured shift when a known LBJ address word is
-         * within two bits; otherwise leave the payload at offset 0 and let
-         * the decoder try.  This stops the shift from following noise. */
-        const uint8_t shift = (addrDist <= 2u) ? measuredShift : 0u;
-
-        /* Every batch starts with its own sync: reset the decoder so a
-         * previous frame's half-finished state cannot leak into this one. */
-        memset(&g.rx, 0, sizeof(g.rx));
-
-        /* Prepend the POCSAG sync.  For an inverted signal, prepend the
-         * inverted sync: lbj_dec then sets pol=0 and inverts every queued
-         * codeword back to normal.  (Prepending the normal sync would pin
-         * the decoder to pol=1 and make inverted signals undecodable.) */
-        const uint32_t sync = inv ? ~POCSAG_SYNC : POCSAG_SYNC;
-        for (int b = 31; b >= 0; b--)
-            lbj_rx_bit(&g.rx, (uint8_t)((sync >> b) & 1u));
-        lbj_process(&g.rx);
-
-        for (uint8_t j = 0; j < 16u; j++) {
-            const uint16_t start = (uint16_t)(shift + j * 32u);
-
-            for (uint8_t b = 0; b < 32u; b++) {
-                const uint16_t i = (uint16_t)(start + b);
-                const uint8_t bit =
-                    i < LBJ_BATCH_BITS ? lbj_payload_bit(words, i) : 0u;
-                lbj_rx_bit(&g.rx, bit);
-            }
-            lbj_process(&g.rx);
-        }
-
-        g.rawCount = LBJ_BATCH_WORDS;
-        g.fill     = 0;
-        g.frames++;
-
-        lbj_fsk_rearm();
-        g.dirty = true;
-        lbj_dump_batch();
+        lbj_decode_batch(LBJ_BATCH_WORDS, true);
     }
 }
 
@@ -663,14 +696,21 @@ void LBJ_Tick(void)
     /* Like the K1 LBJ sampler: only run while the squelch is open.  If the
      * engine kept running through power save, CheckRadioInterrupts() was
      * skipped and the FSK FIFO filled with stale words; the next report then
-     * read garbage until the radio was restarted. */
+     * read garbage until the radio was restarted.
+     *
+     * A short carrier gap between the short block and its detail block must
+     * not cut the batch: keep the engine up for 2 s (200 ticks), the same
+     * debounce the K1 LBJRadio uses.  Power save starts after 10 s, so the
+     * debounce never overlaps it. */
     if (g_SquelchLost) {
-        LBJ_StopSampler();
+        if (++g.lostTicks >= 200u)
+            LBJ_StopSampler();
         return;
     }
+    g.lostTicks = 0u;
 
-    /* A retune resets REG_43/REG_3D; restart the FSK engine so the 25 kHz
-     * filter and the batch setup are applied again. */
+    /* A retune resets REG_43/REG_3D; restart the FSK engine so the filter
+     * and the batch setup are applied again. */
     if (g.on && g.lastFreq != gRxVfo->pRX->Frequency) {
         LBJ_StopSampler();
     }

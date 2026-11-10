@@ -22,6 +22,9 @@
 #include "app/chFrScanner.h"
 #include "app/common.h"
 #include "app/dtmf.h"
+#ifdef ENABLE_LBJ
+    #include "app/lbj.h"
+#endif
 #ifdef ENABLE_FLASHLIGHT
     #include "app/flashlight.h"
 #endif
@@ -562,6 +565,11 @@ void ACTION_Ptt(void)
 
 void ACTION_Wn(void)
 {
+#ifdef ENABLE_LBJ
+    /* The bandwidth change rewrites REG_43; stop the LBJ engine first. */
+    LBJ_StopSampler();
+#endif
+
     #ifdef ENABLE_FEAT_F4HWN_NARROWER
         bool narrower = 0;
         if (FUNCTION_IsRx())

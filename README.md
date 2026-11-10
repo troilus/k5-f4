@@ -33,9 +33,10 @@ BK4819 FSK engine, so LBJ started from the same path:
 - **BK4819 direct-FSK 1.2K engine** with the losehu MDC1200 RX recipe
   (`REG_58=0x3F03`, `REG_5C=0x5625`), POCSAG sync in `REG_5A/5B`, 64-byte
   payload in `REG_5D`, one-word FIFO threshold in `REG_5E`.
-- **Eight RX front-end profiles (C0-C7)**: AirCopy values, TDCS clock
-  recovery, Roger MDC RX gain, CRC on/off, FSK level variants, and the C7
-  POCSAG P front end. `UP`/`DOWN` cycles them on air.
+- **Nine RX front-end profiles (C0-C8)**: AirCopy values, TDCS clock
+  recovery, Roger MDC RX gain, CRC on/off, FSK level variants, the C7
+  POCSAG P front end, and C8 with a 12.5 kHz IF. `UP`/`DOWN` cycles them on
+  air.
 - **AFC enabled** for the FSK slicer.
 - **MSB/LSB FIFO order** and **inverted polarity** (`M/L/I/J`).
 - **Full RX re-arm per batch**.
@@ -43,6 +44,11 @@ BK4819 FSK engine, so LBJ started from the same path:
   search, known-address Hamming distance, short-block buffer.
 - **Raw FIFO dump** on the K-head UART for offline replay.
 - **Offline IQ analysis** with K1 `model_rx.py` on two real recordings.
+- **K1 v5.6.3/v5.6.4 receive fixes ported**: 2 s squelch hold, stop-time
+  batch flush, sampler stop before a receiver reconfigure, C8 narrow IF, and
+  the shift shown on screen is the one the decoder used. The K1 `PK_SHIFT`,
+  overlay carrier hold and detail-digit gates do not apply to the BK4819
+  hardware slicer.
 
 ## Problems found
 
@@ -65,8 +71,9 @@ BK4819 FSK engine, so LBJ started from the same path:
   P front end) did not get below the ~19% BER.
 - The C7 profile produced repeating `2BDC F2B1` / `57B8 E563` words, i.e.
   garbage, not a better slice.
-- Known code bug: when `addrDist > 2`, `app/lbj.c` forces the displayed
-  `shift` to 0 instead of keeping the measured best shift.
+- `addrDist > 2` used to force the decode offset to 0 while the screen kept
+  showing the measured shift. Fixed: the decoder now uses the measured shift,
+  so `S<shift>` matches what was decoded.
 
 ## Why it is blocked
 
@@ -82,7 +89,7 @@ The only remaining K5-only path is to AC-couple the BK4819 AF output
 
 ## Flash budget
 
-- Current LBJ build: **59068 bytes**, about **2.3 KiB free**.
+- Current LBJ build: **58992 bytes**, about **2.4 KiB free**.
 - TDCS and LBJ do not fit together.
 - The PA9 sampler + software demod needs roughly 4-6 KiB, so a dedicated LBJ
   build would have to disable FM radio and UART.
@@ -96,7 +103,8 @@ make ENABLE_TDCS=0 ENABLE_LBJ=1 ENABLE_LBJ_TX=0 TARGET=f4hwn.lbj
 - `ENABLE_LBJ_TX=1` enables the PTT test transmitter (fixed `1234000` /
   function 3 frame).
 - LBJ and TDCS **cannot be enabled together**; they do not fit in 60 KiB.
-- Prebuilt firmware: `compiled-firmware/f4hwn.lbj.bin` (59068 bytes).
+- Prebuilt firmware: `compiled-firmware/f4hwn.lbj.bin` (58992 bytes, version
+  string `LBJ v1.0.3`).
 
 ## Usage
 
@@ -107,7 +115,7 @@ make ENABLE_TDCS=0 ENABLE_LBJ=1 ENABLE_LBJ_TX=0 TARGET=f4hwn.lbj
    - the first six FIFO words of the last batch
    - the BCD message (two lines)
    - `F<frames> C<profile> 5C=xx <order>`
-3. `UP` / `DOWN`: cycle the eight RX front-end profiles (C0-C7).
+3. `UP` / `DOWN`: cycle the nine RX front-end profiles (C0-C8).
 4. `*`: cycle bit order/polarity `M/L/I/J`.
 5. `PTT`: swallowed when `ENABLE_LBJ_TX=0`; sends the fixed test frame when
    `ENABLE_LBJ_TX=1`.
@@ -131,18 +139,19 @@ W3: ...
 The raw FIFO words are dumped before `rev16`/inversion, so a PC can replay
 every shift, bit order and polarity offline.
 
-## RX profiles (C0-C7)
+## RX profiles (C0-C8)
 
-| # | REG_58 | REG_5C | REG_70 | Notes |
-|---|---|---|---|---|
-| 0 | `00C1` | `AA30` | `00E0` | AirCopy values |
-| 1 | `00C1` | `5625` | `00E0` | TDCS real-signal clock recovery |
-| 2 | `37C3` | `AA30` | `00E0` | Roger MDC RX, gain 11 |
-| 3 | `37C3` | `5625` | `00E0` | Combination |
-| 4 | `00C3` | `5625` | `00E0` | RX mode variant |
-| 5 | `00C1` | `5665` | `00E0` | CRC on, alternate clock recovery |
-| 6 | `00C1` | `5625` | `00C3` | FSK level variant |
-| 7 | `03C1` | `5625` | `0000` | POCSAG P front end |
+| # | REG_58 | REG_5C | REG_70 | REG_43 | Notes |
+|---|---|---|---|---|---|
+| 0 | `00C1` | `AA30` | `00E0` | `3628` | AirCopy values, 25 kHz IF |
+| 1 | `00C1` | `5625` | `00E0` | `3628` | TDCS real-signal clock recovery |
+| 2 | `37C3` | `AA30` | `00E0` | `3628` | Roger MDC RX, gain 11 |
+| 3 | `37C3` | `5625` | `00E0` | `3628` | Combination |
+| 4 | `00C3` | `5625` | `00E0` | `3628` | RX mode variant |
+| 5 | `00C1` | `5665` | `00E0` | `3628` | CRC on, alternate clock recovery |
+| 6 | `00C1` | `5625` | `00C3` | `3628` | FSK level variant |
+| 7 | `03C1` | `5625` | `0000` | `47A8` | POCSAG P front end |
+| 8 | `00C1` | `5625` | `00E0` | `3648` | Narrow IF, 12.5 kHz |
 
 ## Files
 
@@ -170,8 +179,9 @@ python tools/lbj_wav_test.py recording.wav
 ## References
 
 - K1 LBJ: `uv-k1-k5v3-fw`, `App/apps/lbj/`, `App/app/lbj_dual.c`,
-  `App/app/pa4_sampler.c`
-- Branch: `lbjradio`, commit `ce5d1d7`
+  `App/app/pa4_sampler.c`; the receive fixes follow K1 `d46a72ab` (v5.6.3-test)
+  and `a5455e2c` (v5.6.4)
+- Branch: `lbjradio` (current HEAD)
 
 ## Known limitations
 

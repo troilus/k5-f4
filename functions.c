@@ -17,6 +17,9 @@
 #include <string.h>
 
 #include "app/dtmf.h"
+#ifdef ENABLE_LBJ
+    #include "app/lbj.h"
+#endif
 #if defined(ENABLE_FMRADIO)
     #include "app/fm.h"
 #endif
@@ -149,6 +152,11 @@ void FUNCTION_PowerSave() {
 
 void FUNCTION_Transmit()
 {
+#ifdef ENABLE_LBJ
+    /* TX rewrites the shared front end; stop the LBJ engine first. */
+    LBJ_StopSampler();
+#endif
+
     // if DTMF is enabled when TX'ing, it changes the TX audio filtering !! .. 1of11
     BK4819_DisableDTMF();
 
