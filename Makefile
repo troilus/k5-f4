@@ -235,7 +235,7 @@ SIZE = arm-none-eabi-size
 
 ifeq ($(ENABLE_FEAT_F4HWN),1)
 	AUTHOR_STRING_1 ?= TDCS
-	VERSION_STRING_1 ?= v1.0.2
+	VERSION_STRING_1 ?= v1.0.3
 
 	EDITION_STRING ?= Custom
 

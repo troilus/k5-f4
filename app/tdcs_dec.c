@@ -110,6 +110,12 @@ static bool tdcs_parse(const uint8_t *f, uint8_t len, tdcs_msg_t *m)
         return false;
     if (f[0] != 0x0Cu || f[1] != 43u || f[10] != 32u)
         return false;
+    /* 3F 1F is the fixed part of the 40-bit address (TB/T 3325 table 9:
+     * 003F1F0000H).  The station and locomotive parts around it vary, so only
+     * this magic pair is checked; it keeps a frame of another protocol from
+     * being parsed as TDCS. */
+    if (f[3] != 0x3Fu || f[4] != 0x1Fu)
+        return false;
 
     const bool test = (f[7] == 0xFFu && f[8] == 0xFFu && f[9] == 0xFFu);
     if (!test && (f[7] != 0x1Fu || f[8] != 0x8Cu || f[9] != 0x30u))
@@ -132,11 +138,17 @@ static bool tdcs_parse(const uint8_t *f, uint8_t len, tdcs_msg_t *m)
     m->loco_ext  = p[11];
     m->loco_no   = le16(p + 12u);
 
-    m->km_valid  = (p[14] != 0xFFu || p[15] != 0xFFu || p[16] != 0xFFu) ? 1u : 0u;
+    /* 9999888 / 8888888 are the test-frame kilometre sentinels and 9999999 is
+     * the "no value" one.  The raw 24-bit value is compared before the 18-bit
+     * mask: after masking, a sentinel turns into a plausible-looking post
+     * (9999999 used to print as K1611+391). */
+    const uint32_t km_raw  = le24(p + 14u);
+    const bool     km_test = (km_raw == 9999888u || km_raw == 8888888u);
+
+    m->km_valid  = ((km_raw & 0x3FFFFFu) <= 999999u && !km_test) ? 1u : 0u;
     m->km_neg    = (p[16] & 0x80u) ? 1u : 0u;
     m->km_inc    = (p[16] & 0x40u) ? 1u : 0u;
-    m->km_abs    = (uint32_t)(p[14] | ((uint16_t)p[15] << 8) |
-                              ((uint16_t)(p[16] & 0x3Fu) << 16));
+    m->km_abs    = km_raw & 0x3FFFFFu;
 
     m->speed       = (uint16_t)(le24(p + 17u) & 0x3FFu);
     m->weight      = le16(p + 20u);
@@ -148,7 +160,7 @@ static bool tdcs_parse(const uint8_t *f, uint8_t len, tdcs_msg_t *m)
     m->route       = p[28];
     m->driver      = le16(p + 29u);
     m->driver_ext  = p[31];
-    m->test        = test ? 1u : 0u;
+    m->test        = (test || km_test) ? 1u : 0u;
     m->crc_ok      = 1u;
     return true;
 }
@@ -192,7 +204,10 @@ static bool framer_bit(tdcs_fr_t *f, uint8_t bit)
     if (c->cw_index >= c->total_cw) {
         f->state = 0u;
         tdcs_msg_t m;
-        if (tdcs_parse(c->frame, c->nbytes, &m)) {
+        /* The codeword stream is padded to an even byte count, so an odd
+         * frame carries one byte outside the CRC.  Hand the decoder the
+         * declared length, not the padded one. */
+        if (tdcs_parse(c->frame, (uint8_t)(c->frame[1] + 2u), &m)) {
             s_msg  = m;
             s_have = true;
             s_fr[0].state = 0u;
