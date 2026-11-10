@@ -1,31 +1,120 @@
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/troilus/uv-k5-firmware-custom-f4)
-#### 基于基于基于基于基于DualTachyon的OneOfEleve和基于fagciegzumer的DualTachyon的egzumer的F4HWN的自用固件：
-- [x] 启用 BYP 输出(用于POCSAG)解码
-- [x] 允许 630-840 MHz RX
-- [x] CNLock 启用 409.000~409.990 MHz TX
-- [x] 修改尾音为 730Hz*2
-- [x] 适配电台与收音机接收音量（之前收音机音量太小了）
-- [x] 精简了用不上的菜单项，默认有扰频的功能
-- [x] 如果是禁止发射的频率，不要显示功率、频差方向（禁止发射的显示功率和频差方向搞毛）
-- [x] 关机保存最后的双单守模式（不能保存我切来干啥）
-- [x] 主屏幕不要显示PTT的模式（PTT的CL、OP和显示CL、OP有毛用，容易误解，删）
-- [x] 主屏幕不显示scanlist（用不上scanlist，显示杂乱，删）
-- [x] 去掉非频率模式下长按5切换scanlist的功能、以及什么不扫描排除频率的功能（用不上scanlist，显示杂乱，删）
-- [x] 8和F8改成都是倒频、9和F9都是快捷M1，不要切背光！（切背光有毛用，显示杂乱，删）
-- [x] 去掉*进入DTMF输入（DTMF用不上，显示杂乱，删）
-- [x] 缩短了双守状态下接收信息后继续单守的时间（双守就双守，单守那么久搞毛）
-- [x] 收发操作后快速1s返回收音机（来快点，等那么久干啥）
-- [x] 顶端图标修改
+# UV-K5 Classic LBJ / POCSAG Receiver
 
-- [ ] 去掉信道模式长按*搜索选项（用不上scanlist，显示杂乱，删）
-- [ ] 收音机状态下可以双守
-- [ ] 收音机固定中国频率范围
-- [ ] 去除了XB模式及显示、菜单
-- [ ] 单收界面修改（需要能够看到另一个信道频率）
-- [ ] 增加中文菜单，信道名？在精简不常用功能的基础上
-- [ ] 信道模式不显示步长
+`lbjradio` branch: receive Chinese railway LBJ/POCSAG (1200 baud) signals on the
+classic UV-K5 without a K1, a PC, or an external module.
 
+## How it works
 
-![image](https://github.com/user-attachments/assets/1cb55267-1525-4489-8a8b-a6acdc8a77f0)
-![image](https://github.com/user-attachments/assets/0a632c70-30e2-411f-a757-42b1fba390db)
-![image](https://github.com/user-attachments/assets/3d42d1ab-2e38-42da-af2b-a74b1cdf2511)
+- Front end: the BK4819 **direct-FSK 1.2K** engine (the same engine AirCopy
+  uses), not the K1's PA4 audio sampler.
+- Decoder: `app/lbj_dec.c`, ported from the K1 LBJ app. BCH(31,21), 2-bit
+  correction, sync tolerance 3, 0..31 bit-shift search.
+- Modulation: `MODULATION_LBJ`, receive-only; TX is disabled by default.
+
+## Status (important)
+
+**This is a diagnostic/WIP branch, not a finished decoder.**
+
+- The decoder core is verified: K1's `model_rx.py` decodes both real IQ
+  recordings with **16/16 clean codewords, 0 errors**.
+- The radio itself does not decode the real signal yet. The BK4819 hardware
+  slicer produces **6-7 bit errors per 32-bit codeword (~19% BER)** on this
+  +/-2.3 kHz signal; 2-bit BCH cannot recover that.
+- The screen usually shows `WAIT SHORT...` or `A-------`. The raw FIFO shows
+  sync/address distances around D5-D8.
+- Next step: **PA9 audio tap + K1 software demod** (low-pass, matched filter,
+  adaptive threshold, DPLL). Not implemented yet.
+
+## Build
+
+```bash
+make ENABLE_TDCS=0 ENABLE_LBJ=1 ENABLE_LBJ_TX=0 TARGET=f4hwn.lbj
+```
+
+- `ENABLE_LBJ_TX=1` enables the PTT test transmitter (fixed `1234000` /
+  function 3 frame).
+- LBJ and TDCS **cannot be enabled together**; they do not fit in 60 KiB.
+- Prebuilt firmware: `compiled-firmware/f4hwn.lbj.bin` (59068 bytes).
+
+## Usage
+
+1. Set a VFO's modulation to `LBJ`. The main screen becomes the LBJ decode page.
+2. Screen layout:
+   - `A<short-block address> S<shift> D<address distance>`
+   - `IRQ xxxx ST xxxx`
+   - the first six FIFO words of the last batch
+   - the BCD message (two lines)
+   - `F<frames> C<profile> 5C=xx <order>`
+3. `UP` / `DOWN`: cycle the eight RX front-end profiles (C0-C7).
+4. `*`: cycle bit order/polarity `M/L/I/J`.
+5. `PTT`: swallowed when `ENABLE_LBJ_TX=0`; sends the fixed test frame when
+   `ENABLE_LBJ_TX=1`.
+6. The FSK engine stops while the squelch is closed, so stale FIFO words cannot
+   pile up.
+7. The short block `1233999/1234000` is kept in its own buffer so the detail
+   block `1234001/1234002` cannot overwrite it.
+
+## UART raw dump
+
+2.5 mm K-head, **38400 8N1**. One line per second while batches arrive:
+
+```text
+LBJ C<cfg> <M|L|I|J> S<shift> D<dist> IRQ<xxxx> ST<xxxx>
+W0: eight 16-bit words
+W1: ...
+W2: ...
+W3: ...
+```
+
+The raw FIFO words are dumped before `rev16`/inversion, so a PC can replay
+every shift, bit order and polarity offline.
+
+## RX profiles (C0-C7)
+
+| # | REG_58 | REG_5C | REG_70 | Notes |
+|---|---|---|---|---|
+| 0 | `00C1` | `AA30` | `00E0` | AirCopy values |
+| 1 | `00C1` | `5625` | `00E0` | TDCS real-signal clock recovery |
+| 2 | `37C3` | `AA30` | `00E0` | Roger MDC RX, gain 11 |
+| 3 | `37C3` | `5625` | `00E0` | Combination |
+| 4 | `00C3` | `5625` | `00E0` | RX mode variant |
+| 5 | `00C1` | `5665` | `00E0` | CRC on, alternate clock recovery |
+| 6 | `00C1` | `5625` | `00C3` | FSK level variant |
+| 7 | `03C1` | `5625` | `0000` | POCSAG P front end |
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `app/lbj.c` / `app/lbj.h` | Front end, profiles, FIFO, display, UART, PTT |
+| `app/lbj_dec.c` / `app/lbj_dec.h` | POCSAG BCH / address / BCD |
+| `radio.c` / `radio.h` | `MODULATION_LBJ`, AFC, RX filter bypass, TX inhibit |
+| `app/app.c` | Interrupt hand-off, 10 ms tick, PTT hook |
+| `ui/main.c` | LBJ page takes over the main screen |
+| `tools/lbj_wav_test.py` | Offline decoder regression |
+| `compiled-firmware/f4hwn.lbj.bin` | Prebuilt LBJ firmware |
+
+## Offline test
+
+```bash
+python tools/lbj_wav_test.py recording.wav
+```
+
+- The WAV must be a 1200-baud POCSAG discriminator/audio recording.
+- The script resamples to 19.2 kHz, removes DC, slices at every bit phase and
+  verifies the 2-bit BCH and the 0..31 bit-shift search.
+- This is a decoder test, not an RF test.
+
+## References
+
+- K1 LBJ: `uv-k1-k5v3-fw`, `App/apps/lbj/`, `App/app/lbj_dual.c`,
+  `App/app/pa4_sampler.c`
+- Branch: `lbjradio`, commit `ce5d1d7`
+
+## Known limitations
+
+- The BK4819 hardware slicer produces ~19% BER on the real signal; 2-bit BCH
+  cannot recover it.
+- There is no PA9 audio tap, so software demodulation is not implemented.
+- LBJ and TDCS do not fit in flash at the same time.
+- PTT transmits only the fixed test frame, not a complete LBJ protocol.
