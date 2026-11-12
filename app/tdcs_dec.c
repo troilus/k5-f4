@@ -39,6 +39,10 @@ typedef struct {
 static tdcs_fr_t  s_fr[2];
 static tdcs_msg_t s_msg;
 static bool       s_have;
+#ifdef ENABLE_TDCS_ACK
+static ack_msg_t  s_ack;
+static bool       s_have_ack;
+#endif
 
 /* ---- BCH(26,16), generator 0x5B9 --------------------------------------- */
 
@@ -165,6 +169,109 @@ static bool tdcs_parse(const uint8_t *f, uint8_t len, tdcs_msg_t *m)
     return true;
 }
 
+#ifdef ENABLE_TDCS_ACK
+/* ---- TDCS ACK: TB/T 3231 table 7 --------------------------------------- */
+
+/* BCD bytes -> number, 0xFFFFFFFF when a nibble is not a digit. */
+static uint32_t ack_bcd(const uint8_t *p, uint8_t n)
+{
+    uint32_t v = 0u;
+
+    for (uint8_t i = 0; i < n; i++) {
+        const uint8_t hi = (uint8_t)(p[i] >> 4);
+        const uint8_t lo = (uint8_t)(p[i] & 0x0Fu);
+        if (hi > 9u || lo > 9u)
+            return 0xFFFFFFFFu;
+        v = v * 100u + (uint32_t)hi * 10u + lo;
+    }
+    return v;
+}
+
+/* Printable ASCII only; trailing spaces dropped. */
+static void ack_str(char *dst, const uint8_t *src, uint8_t n)
+{
+    uint8_t k = 0u;
+
+    for (uint8_t i = 0; i < n; i++) {
+        const uint8_t c = src[i];
+        if (c >= 0x20u && c < 0x7Fu)
+            dst[k++] = (char)c;
+    }
+    while (k && dst[k - 1u] == ' ')
+        k--;
+    dst[k] = '\0';
+}
+
+/* Table 7 signing position: longitude 2 BCD degrees + 3 BCD minutes,
+ * latitude 1 BCD degree + 3 BCD minutes.  Minutes are MM.mmmm (six digits). */
+static void ack_fix(const uint8_t *p, ack_msg_t *a)
+{
+    const uint32_t lon_deg = ack_bcd(p + 0u, 2u);
+    const uint32_t lon_min = ack_bcd(p + 2u, 3u);
+    const uint32_t lat_deg = ack_bcd(p + 5u, 1u);
+    const uint32_t lat_min = ack_bcd(p + 6u, 3u);
+
+    if (lon_deg == 0xFFFFFFFFu || lon_min == 0xFFFFFFFFu ||
+        lat_deg == 0xFFFFFFFFu || lat_min == 0xFFFFFFFFu)
+        return;
+    if (lon_deg > 180u || lat_deg > 90u ||
+        lon_min >= 600000u || lat_min >= 600000u)
+        return;
+
+    a->lon6 = lon_deg * 1000000u + (lon_min * 5u) / 3u;
+    a->lat6 = lat_deg * 1000000u + (lat_min * 5u) / 3u;
+    a->fix  = 1u;
+}
+
+/* Parse one 0x88 table 7 frame. */
+static bool ack_parse(const uint8_t *f, uint8_t len, ack_msg_t *a)
+{
+    if (len < 61u)
+        return false;
+    if (f[0] != 0x0Cu || f[9] != 0x88u)
+        return false;
+
+    const uint8_t m = f[10];
+    if (m < 48u)
+        return false;
+    if (f[1] != (uint8_t)(m + 11u))
+        return false;
+    if ((uint16_t)f[1] + 2u > len)
+        return false;
+
+    const uint16_t rx = (uint16_t)(((uint16_t)f[f[1]] << 8) | f[f[1] + 1u]);
+    if (crc16(f, f[1]) != rx)
+        return false;
+
+    const uint8_t *p = f + 11u;
+    if (p[0] != 0x81u && p[0] != 0x82u && p[0] != 0x91u)
+        return false;
+
+    memset(a, 0, sizeof(*a));
+    a->type = p[0];
+    a->func = p[1];
+    memcpy(a->date, p + 2u, 3u);
+    memcpy(a->time, p + 5u, 3u);
+    ack_str(a->train, p + 8u, 7u);
+    ack_str(a->loco, p + 15u, 8u);
+    a->place_lo = p[23];
+    ack_str(a->num, p + 24u, 6u);
+
+    const uint32_t km = le24(p + 30u);
+    if (km != 0xFFFFFFu) {
+        a->km_valid = 1u;
+        a->km_abs   = km & 0x3FFFFFu;
+        a->km_neg   = (km & 0x800000u) ? 1u : 0u;
+        a->km_inc   = (km & 0x400000u) ? 1u : 0u;
+    }
+
+    ack_fix(p + 33u, a);
+    a->place_hi = p[42];
+    a->pkt      = p[47];
+    return true;
+}
+#endif /* ENABLE_TDCS_ACK */
+
 /* ---- 26-bit codewords -------------------------------------------------- */
 
 static bool framer_bit(tdcs_fr_t *f, uint8_t bit)
@@ -190,11 +297,26 @@ static bool framer_bit(tdcs_fr_t *f, uint8_t bit)
     c->cw_index++;
 
     if (c->cw_index == 1u) {
-        if (c->frame[0] != 0x0Cu || c->frame[1] != 43u) {
+        if (c->frame[0] != 0x0Cu) {
+            f->state = 0u;
+            return false;
+        }
+#ifdef ENABLE_TDCS_ACK
+        /* 43 is the 45-byte train report; a table 7 reply is m + 11 with
+         * m >= 48, i.e. 59 bytes or more. */
+        const uint8_t flen = c->frame[1];
+        if (flen != 43u && flen < 59u) {
+            f->state = 0u;
+            return false;
+        }
+        c->total_cw = (uint8_t)(((uint16_t)flen + 3u) / 2u);
+#else
+        if (c->frame[1] != 43u) {
             f->state = 0u;
             return false;
         }
         c->total_cw = (uint8_t)(((uint16_t)c->frame[1] + 3u) / 2u);
+#endif
         if (c->total_cw < 2u || c->total_cw > TDCS_CW_COUNT) {
             f->state = 0u;
             return false;
@@ -203,6 +325,20 @@ static bool framer_bit(tdcs_fr_t *f, uint8_t bit)
 
     if (c->cw_index >= c->total_cw) {
         f->state = 0u;
+#ifdef ENABLE_TDCS_ACK
+        /* A table 7 reply travels on the TDCS channel in a 0x88 frame. */
+        if (c->frame[9] == 0x88u) {
+            ack_msg_t a;
+            if (ack_parse(c->frame, (uint8_t)(c->frame[1] + 2u), &a)) {
+                s_ack      = a;
+                s_have_ack = true;
+                s_fr[0].state = 0u;
+                s_fr[1].state = 0u;
+                return true;
+            }
+            return false;
+        }
+#endif
         tdcs_msg_t m;
         /* The codeword stream is padded to an even byte count, so an odd
          * frame carries one byte outside the CRC.  Hand the decoder the
@@ -225,6 +361,10 @@ void TDCS_DecReset(void)
     memset(s_fr, 0, sizeof(s_fr));
     memset(&s_msg, 0, sizeof(s_msg));
     s_have = false;
+#ifdef ENABLE_TDCS_ACK
+    memset(&s_ack, 0, sizeof(s_ack));
+    s_have_ack = false;
+#endif
 }
 
 void TDCS_DecSync(void)
@@ -272,3 +412,14 @@ bool TDCS_DecTake(tdcs_msg_t *out)
     s_have = false;
     return true;
 }
+
+#ifdef ENABLE_TDCS_ACK
+bool TDCS_DecTakeAck(ack_msg_t *out)
+{
+    if (!s_have_ack)
+        return false;
+    *out = s_ack;
+    s_have_ack = false;
+    return true;
+}
+#endif
