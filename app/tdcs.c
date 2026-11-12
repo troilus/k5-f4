@@ -14,6 +14,9 @@
 
 #include "tdcs.h"
 #include "tdcs_dec.h"
+#ifdef ENABLE_TDCS_ACK
+    #include "qr.h"
+#endif
 
 #include "audio.h"
 #include "driver/backlight.h"
@@ -33,6 +36,10 @@
 /* ---- receiver ---------------------------------------------------------- */
 
 #define TDCS_HISTORY        8u
+#ifdef ENABLE_TDCS_ACK
+#define ACK_HISTORY         8u
+#define MERGED_MAX          (TDCS_HISTORY + ACK_HISTORY)
+#endif
 #define TDCS_PAGES          3u
 #define TDCS_ROWS           6u
 #define TDCS_FOOTER         6u
@@ -46,7 +53,12 @@
 #define TDCS_FSK_TONE2_GAIN 0x00E0u  /* REG_70: tone2 on, gain 96             */
 #define TDCS_FSK_TONE2_1200 0x3065u  /* REG_72: 1200 Hz / bit clock           */
 #define TDCS_FSK_5C_NOCRC   0x5625u  /* losehu MDC1200 RX value, CRC off      */
-#define TDCS_FSK_5D_75BYTE  0x4A00u  /* 75 bytes = 23 codewords               */
+#ifdef ENABLE_TDCS_ACK
+/* A table 7 reply is 31 codewords = 806 bits = 101 bytes. */
+#define TDCS_FSK_5D_BYTES   0x6400u
+#else
+#define TDCS_FSK_5D_BYTES   0x4A00u  /* 75 bytes = 23 codewords               */
+#endif
 #define TDCS_FSK_5E_1WORD   0x0201u  /* RX FIFO almost full at 1 word         */
 #define TDCS_IRQ_SYNC       0x0002u
 #define TDCS_IRQ_FIFO       0x1000u
@@ -70,9 +82,30 @@ typedef struct {
     int16_t    rssi;
 } tdcs_rec_t;
 
+#ifdef ENABLE_TDCS_ACK
+typedef struct {
+    ack_msg_t a;
+    uint16_t  sec;
+    int16_t   rssi;
+} ack_rec_t;
+
+/* The merged history: kind 0 points into rec[], kind 1 into ack[]. */
+typedef struct {
+    uint8_t kind;
+    uint8_t idx;
+} merge_ent_t;
+#endif
+
 static struct {
     tdcs_rec_t rec[TDCS_HISTORY];
     uint8_t    count, cur, page;
+#ifdef ENABLE_TDCS_ACK
+    ack_rec_t  ack[ACK_HISTORY];
+    merge_ent_t mlist[MERGED_MAX];
+    uint8_t    acount, mcount;
+    bool       ackQr;
+    uint64_t   qrM[QR_N];
+#endif
     bool       popup, dismissed, pinned, dirty, on, capturing;
     uint8_t    idle, ledPhase, ledTick;
     uint16_t   sec, subSec, popSec;
@@ -523,12 +556,179 @@ static void draw_field(uint8_t row, const tdcs_rec_t *r, uint8_t idx)
     }
 }
 
+#ifdef ENABLE_TDCS_ACK
+/* ---- TDCS ACK window: TB/T 3231 table 7 -------------------------------- */
+
+static char *putbcd2(char *o, uint8_t v)
+{
+    const uint8_t hi = (uint8_t)(v >> 4);
+    const uint8_t lo = (uint8_t)(v & 0x0Fu);
+
+    *o++ = (hi <= 9u) ? (char)('0' + hi) : '?';
+    *o++ = (lo <= 9u) ? (char)('0' + lo) : '?';
+    return o;
+}
+
+static const char *ack_name(uint8_t t)
+{
+    switch (t) {
+        case 0x81: return "自动确认";
+        case 0x82: return "手动签收";
+        case 0x91: return "调车请求";
+        default:   return "回执";
+    }
+}
+
+/* The map QR page: 33 x 33 modules scaled into 70 x 56 px, the K1 layout. */
+#define QR_PX_W 70u
+#define QR_PX_H 56u
+#define QR_X ((LCD_WIDTH  - QR_PX_W) / 2u)
+#define QR_Y ((LCD_HEIGHT - QR_PX_H) / 2u)
+
+static void qr_pixel(uint8_t x, uint8_t y)
+{
+    if (y < 8u)
+        PutPixelStatus(x, y, true);
+    else
+        PutPixel(x, (uint8_t)(y - 8u), true);
+}
+
+static void draw_qr(void)
+{
+    UI_DisplayClear();
+    memset(gStatusLine, 0, sizeof(gStatusLine));
+
+    for (uint8_t my = 0; my < QR_N; my++) {
+        const uint64_t row = g.qrM[my];
+        if (!row)
+            continue;
+
+        const unsigned y0 = QR_Y + ((unsigned)my * QR_PX_H + QR_N / 2u) / QR_N;
+        const unsigned y1 = QR_Y + ((unsigned)(my + 1u) * QR_PX_H + QR_N / 2u) / QR_N;
+
+        for (uint8_t mx = 0; mx < QR_N; mx++) {
+            if (!(row & (1ull << mx)))
+                continue;
+
+            const unsigned x0 = QR_X + ((unsigned)mx * QR_PX_W + QR_N / 2u) / QR_N;
+            const unsigned x1 = QR_X + ((unsigned)(mx + 1u) * QR_PX_W + QR_N / 2u) / QR_N;
+
+            for (unsigned y = y0; y < y1; y++)
+                for (unsigned x = x0; x < x1; x++)
+                    qr_pixel((uint8_t)x, (uint8_t)y);
+        }
+    }
+
+    ST7565_BlitStatusLine();
+    ST7565_BlitFullScreen();
+}
+
+static void draw_ack(const ack_rec_t *r)
+{
+    const ack_msg_t *a = &r->a;
+    char s[32];
+    char v[32];
+    char *o;
+
+    if (g.ackQr) {
+        draw_qr();
+        return;
+    }
+
+    UI_DisplayClear();
+
+    /* row 0: train number, date on the right */
+    o = s;
+    o = put(o, a->train[0] ? a->train : "----");
+    *o = '\0';
+    UI_PrintStringSmallBold(s, 0, 0, 0);
+
+    if (a->date[0] || a->date[1] || a->date[2]) {
+        o = s;
+        o = putbcd2(o, a->date[0]);
+        *o++ = '-';
+        o = putbcd2(o, a->date[1]);
+        *o++ = '-';
+        o = putbcd2(o, a->date[2]);
+        *o = '\0';
+        UI_PrintStringSmallNormal(s, (uint8_t)(128u - (uint8_t)(o - s) * 7u), 0, 0);
+    }
+
+    /* row 1: reply type and time */
+    o = v;
+    o = put(o, ack_name(a->type));
+    *o++ = ' ';
+    o = putbcd2(o, a->time[0]);
+    *o++ = ':';
+    o = putbcd2(o, a->time[1]);
+    *o++ = ':';
+    o = putbcd2(o, a->time[2]);
+    *o = '\0';
+    field_row(1, "回执", v);
+
+    field_row(2, "机车", a->loco[0] ? a->loco : "--");
+    field_row(3, "编号", a->num[0] ? a->num : "--");
+
+    if (a->km_valid) {
+        o = v;
+        if (a->km_neg)
+            *o++ = '-';
+        *o++ = 'K';
+        o = putu(o, a->km_abs / 1000u);
+        *o++ = '+';
+        o = putpad(o, a->km_abs % 1000u, 3u);
+        *o++ = a->km_inc ? '^' : 'v';
+        *o = '\0';
+    } else {
+        o = put(v, "--");
+        *o = '\0';
+    }
+    field_row(4, "公里", v);
+
+    o = v;
+    o = putu(o, (uint32_t)(((uint16_t)a->place_hi << 8) | a->place_lo));
+    o = put(o, " 包");
+    o = putu(o, a->pkt);
+    *o = '\0';
+    field_row(5, "处所", v);
+
+    /* footer: merged index, age, the QR hint */
+    o = s;
+    o = putu(o, (uint32_t)g.cur + 1u);
+    *o++ = '/';
+    o = putu(o, g.mcount);
+    *o = '\0';
+    UI_PrintStringSmallNormal(s, 0, 0, TDCS_FOOTER);
+
+    o = putage(s, (uint16_t)(g.sec - r->sec));
+    *o = '\0';
+    UI_PrintStringSmallNormal(s, 52, 0, TDCS_FOOTER);
+
+    if (a->fix)
+        UI_PrintStringSmallNormal("*地图", 84, 0, TDCS_FOOTER);
+
+    ST7565_BlitStatusLine();
+    ST7565_BlitFullScreen();
+}
+#endif /* ENABLE_TDCS_ACK */
+
 void TDCS_DrawPopup(void)
 {
-    if (!g.count)
+#ifdef ENABLE_TDCS_ACK
+    if (!g.mcount)
         return;
 
+    const merge_ent_t *e = &g.mlist[g.cur];
+    if (e->kind == 1u) {
+        draw_ack(&g.ack[e->idx]);
+        return;
+    }
+    const tdcs_rec_t *r = &g.rec[e->idx];
+#else
+    if (!g.count)
+        return;
     const tdcs_rec_t *r = &g.rec[g.cur];
+#endif
     char s[32];
     char *o;
 
@@ -554,7 +754,11 @@ void TDCS_DrawPopup(void)
     o = s;
     o = putu(o, (uint32_t)g.cur + 1u);
     *o++ = '/';
+#ifdef ENABLE_TDCS_ACK
+    o = putu(o, g.mcount);
+#else
     o = putu(o, g.count);
+#endif
     *o = '\0';
     UI_PrintStringSmallNormal(s, 0, 0, TDCS_FOOTER);
 
@@ -609,6 +813,43 @@ static void ledService(void)
 
 /* ---- history ----------------------------------------------------------- */
 
+#ifdef ENABLE_TDCS_ACK
+static uint16_t merge_sec(const merge_ent_t *e)
+{
+    return (e->kind == 0u) ? g.rec[e->idx].sec : g.ack[e->idx].sec;
+}
+
+/* Rebuild the merged TDCS + ACK list, newest first.  Both arrays are already
+ * newest-first, so the insertion sort is over at most 16 entries. */
+static void merged_rebuild(void)
+{
+    uint8_t n = 0u;
+
+    for (uint8_t i = 0; i < g.count; i++) {
+        g.mlist[n].kind = 0u;
+        g.mlist[n].idx  = i;
+        n++;
+    }
+    for (uint8_t i = 0; i < g.acount; i++) {
+        g.mlist[n].kind = 1u;
+        g.mlist[n].idx  = i;
+        n++;
+    }
+
+    for (uint8_t i = 1u; i < n; i++) {
+        const merge_ent_t e = g.mlist[i];
+        const uint16_t s = merge_sec(&e);
+        int j = (int)i - 1;
+        while (j >= 0 && merge_sec(&g.mlist[j]) < s) {
+            g.mlist[j + 1] = g.mlist[j];
+            j--;
+        }
+        g.mlist[j + 1] = e;
+    }
+    g.mcount = n;
+}
+#endif
+
 static void tdcs_store(const tdcs_msg_t *m)
 {
     int found = -1;
@@ -640,6 +881,12 @@ static void tdcs_store(const tdcs_msg_t *m)
         g.page = 0u;
     }
 
+#ifdef ENABLE_TDCS_ACK
+    merged_rebuild();
+    g.cur   = 0u;
+    g.ackQr = false;
+#endif
+
     g.dirty = true;
 
     if (!g.ledPhase) {
@@ -656,6 +903,57 @@ static void tdcs_store(const tdcs_msg_t *m)
     BACKLIGHT_TurnOn();
 }
 
+#ifdef ENABLE_TDCS_ACK
+static void ack_store(const ack_msg_t *a)
+{
+    int found = -1;
+
+    for (uint8_t i = 0; i < g.acount; i++) {
+        if (g.ack[i].a.type == a->type &&
+            strcmp(g.ack[i].a.train, a->train) == 0 &&
+            strcmp(g.ack[i].a.loco, a->loco) == 0 &&
+            strcmp(g.ack[i].a.num, a->num) == 0 &&
+            (uint16_t)(g.sec - g.ack[i].sec) <= TDCS_MERGE_SECS) {
+            found = (int)i;
+            break;
+        }
+    }
+
+    if (found >= 0) {
+        g.ack[found].a    = *a;
+        g.ack[found].sec  = g.sec;
+        g.ack[found].rssi = (int16_t)(BK4819_GetRSSI_dBm() + dBmCorrTable[gRxVfo->Band]);
+    } else {
+        if (g.acount < ACK_HISTORY)
+            g.acount++;
+        for (uint8_t i = (uint8_t)(g.acount - 1u); i > 0u; i--)
+            g.ack[i] = g.ack[i - 1u];
+        g.ack[0].a    = *a;
+        g.ack[0].sec  = g.sec;
+        g.ack[0].rssi = (int16_t)(BK4819_GetRSSI_dBm() + dBmCorrTable[gRxVfo->Band]);
+    }
+
+    merged_rebuild();
+    g.cur   = 0u;
+    g.page  = 0u;
+    g.ackQr = false;
+    g.dirty = true;
+
+    if (!g.ledPhase) {
+        g.ledPhase = TDCS_LED_PHASES;
+        g.ledTick  = 0u;
+    }
+
+    if (!g.dismissed) {
+        if (!g.popup)
+            g.pinned = false;
+        g.popup = true;
+    }
+    g.popSec = g.sec;
+    BACKLIGHT_TurnOn();
+}
+#endif /* ENABLE_TDCS_ACK */
+
 /* ---- FSK engine -------------------------------------------------------- */
 
 static void tdcs_fsk_start(void)
@@ -671,7 +969,7 @@ static void tdcs_fsk_start(void)
     BK4819_WriteRegister(BK4819_REG_5A, 0x0DD4u);
     BK4819_WriteRegister(BK4819_REG_5B, 0x259Fu);
     BK4819_WriteRegister(BK4819_REG_5C, TDCS_FSK_5C_NOCRC);
-    BK4819_WriteRegister(BK4819_REG_5D, TDCS_FSK_5D_75BYTE);
+    BK4819_WriteRegister(BK4819_REG_5D, TDCS_FSK_5D_BYTES);
     BK4819_WriteRegister(BK4819_REG_5E, TDCS_FSK_5E_1WORD);
     BK4819_WriteRegister(BK4819_REG_59, 0xC008u);
     BK4819_WriteRegister(BK4819_REG_59, 0x1008u);
@@ -723,18 +1021,40 @@ static void tdcs_take(void)
 {
     const uint16_t w = BK4819_ReadRegister(BK4819_REG_5F);
     tdcs_msg_t m;
+#ifdef ENABLE_TDCS_ACK
+    ack_msg_t a;
+#endif
 
-    if (TDCS_DecWord16(w) && TDCS_DecTake(&m))
+    if (!TDCS_DecWord16(w))
+        return;
+#ifdef ENABLE_TDCS_ACK
+    if (TDCS_DecTakeAck(&a)) {
+        ack_store(&a);
+        return;
+    }
+#endif
+    if (TDCS_DecTake(&m))
         tdcs_store(&m);
 }
 
 static void tdcs_finish(void)
 {
     tdcs_msg_t m;
+#ifdef ENABLE_TDCS_ACK
+    ack_msg_t a;
+#endif
 
     for (uint8_t i = 0; i < 8u; i++)
         tdcs_take();
-    if (TDCS_DecEnd() && TDCS_DecTake(&m))
+    if (!TDCS_DecEnd())
+        return;
+#ifdef ENABLE_TDCS_ACK
+    if (TDCS_DecTakeAck(&a)) {
+        ack_store(&a);
+        return;
+    }
+#endif
+    if (TDCS_DecTake(&m))
         tdcs_store(&m);
 }
 
@@ -779,6 +1099,9 @@ void TDCS_ClosePopup(void)
     if (g.popup) {
         g.popup     = false;
         g.dismissed = true;
+#ifdef ENABLE_TDCS_ACK
+        g.ackQr     = false;
+#endif
         gUpdateDisplay = true;
         gUpdateStatus  = true;
     }
@@ -786,8 +1109,14 @@ void TDCS_ClosePopup(void)
 
 bool TDCS_OpenPopup(void)
 {
+#ifdef ENABLE_TDCS_ACK
+    if (!g.mcount)
+        return false;
+    g.ackQr = false;
+#else
     if (!g.count)
         return false;
+#endif
 
     g.cur       = 0u;
     g.page      = 0u;
@@ -998,13 +1327,38 @@ bool TDCS_HandleKey(uint8_t key, bool pressed, bool held)
         TDCS_ClosePopup();
         return true;
     }
+#ifdef ENABLE_TDCS_ACK
+    /* The QR page: star or EXIT closes only the code, back to the receipt. */
+    if (g.ackQr) {
+        if (key == KEY_STAR || key == KEY_EXIT) {
+            g.ackQr = false;
+            g.dirty = true;
+        }
+        return true;
+    }
+    if (key == KEY_STAR) {
+        if (g.mcount && g.mlist[g.cur].kind == 1u) {
+            const ack_msg_t *a = &g.ack[g.mlist[g.cur].idx].a;
+            if (a->fix && QR_Build(a->lat6, a->lon6, g.qrM)) {
+                g.ackQr = true;
+                g.dirty = true;
+            }
+        }
+        return true;
+    }
+#endif
     if (key == KEY_UP || key == KEY_DOWN) {
-        if (g.count) {
+#ifdef ENABLE_TDCS_ACK
+        const int n = (int)g.mcount;
+#else
+        const int n = (int)g.count;
+#endif
+        if (n) {
             int t = (int)g.cur + ((key == KEY_UP) ? -1 : 1);
             if (t < 0)
                 t = 0;
-            if (t > (int)g.count - 1)
-                t = (int)g.count - 1;
+            if (t > n - 1)
+                t = n - 1;
             if ((uint8_t)t != g.cur) {
                 g.cur  = (uint8_t)t;
                 g.page = 0u;
@@ -1013,15 +1367,17 @@ bool TDCS_HandleKey(uint8_t key, bool pressed, bool held)
         }
         return true;
     }
-    if (key == KEY_6) {
-        if (g.page > 0u) {
-            g.page--;
-            g.dirty = true;
-        }
-        return true;
-    }
-    if (key == KEY_9) {
-        if ((uint8_t)(g.page + 1u) < TDCS_PAGES) {
+    if (key == KEY_6 || key == KEY_9) {
+#ifdef ENABLE_TDCS_ACK
+        if (g.mcount && g.mlist[g.cur].kind == 1u)
+            return true;      /* a receipt is one page */
+#endif
+        if (key == KEY_6) {
+            if (g.page > 0u) {
+                g.page--;
+                g.dirty = true;
+            }
+        } else if ((uint8_t)(g.page + 1u) < TDCS_PAGES) {
             g.page++;
             g.dirty = true;
         }
@@ -1029,6 +1385,10 @@ bool TDCS_HandleKey(uint8_t key, bool pressed, bool held)
     }
     if (key == KEY_2) {
         g.count = 0u;
+#ifdef ENABLE_TDCS_ACK
+        g.acount = 0u;
+        g.mcount = 0u;
+#endif
         g.cur   = 0u;
         g.page  = 0u;
         TDCS_ClosePopup();
