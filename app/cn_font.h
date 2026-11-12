@@ -18,7 +18,7 @@
 #define CN_FONT_GLYPH8    8u
 
 /* Number of 8x8 characters carried in the image. */
-#define CN_FONT_COUNT8    55u
+#define CN_FONT_COUNT8    72u
 
 /* Null when the character is not in the built-in set. */
 const uint8_t *CN_FONT_Glyph8(uint16_t code);
