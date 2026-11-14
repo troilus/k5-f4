@@ -1153,6 +1153,51 @@ static char *putpadn(char *o, uint32_t v, uint8_t n)
     return o;
 }
 
+/* Copy at most n characters of a report from `from`, stopping at its end. */
+static void lbj_sub(char *dst, const lbj_msg_t *m, uint8_t from, uint8_t n)
+{
+    uint8_t k = 0u;
+
+    while (k < n && (uint16_t)(from + k) < m->len) {
+        dst[k] = m->txt[from + k];
+        k++;
+    }
+    dst[k] = '\0';
+}
+
+/* parse_int from the reference build: skip spaces, optional '-', decimal
+ * digits only, and the range must end exactly on `end`. */
+static bool lbj_parse_int(const lbj_msg_t *m, uint8_t start, uint8_t end, int32_t *out)
+{
+    uint8_t i = start;
+    int32_t v = 0;
+    int8_t  sign = 1;
+    bool    any = false;
+
+    if (end > m->len)
+        end = m->len;
+
+    while (i < end && m->txt[i] == ' ')
+        i++;
+    if (i < end && m->txt[i] == '-') {
+        sign = -1;
+        i++;
+    }
+    while (i < end && m->txt[i] >= '0' && m->txt[i] <= '9') {
+        v = v * 10 + (m->txt[i] - '0');
+        any = true;
+        i++;
+    }
+    while (i < end && m->txt[i] == ' ')
+        i++;
+
+    if (!any || i != end)
+        return false;
+
+    *out = v * sign;
+    return true;
+}
+
 void LBJ_Draw(void)
 {
     char s[24];
@@ -1207,7 +1252,93 @@ void LBJ_Draw(void)
     *o = '\0';
     UI_PrintStringSmallNormal(s, 0, 0, 1);
 
-    if (g.hexView) {
+    if (!g.hexView && m->addr == 1234002u && m->len == 50u) {
+        /* Detail block: the reference field offsets.
+         *   L: t[4..8)-t[8..12)      E: t[30..33) t[33..35) t[35..39)
+         *   N: t[39..41) t[41..43) t[43..47)   R: t[12..14) T: t[47..50) */
+        char a[10];
+
+        o = s;
+        o = put(o, "L:");
+        lbj_sub(a, m, 4u, 4u);
+        o = put(o, a);
+        *o++ = '-';
+        lbj_sub(a, m, 8u, 4u);
+        o = put(o, a);
+        *o = '\0';
+        UI_PrintStringSmallNormal(s, 0, 0, 2);
+
+        /* Route: the reference maps a GBK station code to pinyin; until that
+         * table is ported, show the raw characters. */
+        lbj_sub(a, m, 14u, 8u);
+        UI_PrintStringSmallNormal(a, 0, 0, 3);
+
+        o = s;
+        *o++ = 'E';
+        lbj_sub(a, m, 30u, 3u);
+        o = put(o, a);
+        *o++ = ' ';
+        lbj_sub(a, m, 33u, 2u);
+        o = put(o, a);
+        *o++ = '.';
+        lbj_sub(a, m, 35u, 4u);
+        o = put(o, a);
+        *o = '\0';
+        UI_PrintStringSmallNormal(s, 0, 0, 4);
+
+        o = s;
+        *o++ = 'N';
+        lbj_sub(a, m, 39u, 2u);
+        o = put(o, a);
+        *o++ = ' ';
+        lbj_sub(a, m, 41u, 2u);
+        o = put(o, a);
+        *o++ = '.';
+        lbj_sub(a, m, 43u, 4u);
+        o = put(o, a);
+        *o = '\0';
+        UI_PrintStringSmallNormal(s, 0, 0, 5);
+
+        o = s;
+        o = put(o, "R:");
+        lbj_sub(a, m, 12u, 2u);
+        o = put(o, a);
+        o = put(o, " T:");
+        lbj_sub(a, m, 47u, 3u);
+        o = put(o, a);
+        *o = '\0';
+        UI_PrintStringSmallNormal(s, 0, 0, 6);
+    } else if (!g.hexView && m->addr == 1234000u && m->len == 15u) {
+        /* Short block: Z: t[0..5), V: t[5..9), KM: t[9..15) with one decimal. */
+        int32_t z = 0, v = 0, km = 0;
+
+        lbj_parse_int(m, 0u, 5u, &z);
+        lbj_parse_int(m, 5u, 9u, &v);
+        lbj_parse_int(m, 9u, 15u, &km);
+
+        o = s;
+        o = put(o, "Z:");
+        o = putu(o, (uint32_t)z);
+        o = put(o, " V:");
+        o = putu(o, (uint32_t)v);
+        o = put(o, "km/h");
+        *o = '\0';
+        UI_PrintStringSmallNormal(s, 0, 0, 2);
+
+        o = s;
+        o = put(o, "KM:");
+        if (km < 0) {
+            o = put(o, "-");
+            km = -km;
+        }
+        o = putu(o, (uint32_t)(km / 10));
+        *o++ = '.';
+        o = putu(o, (uint32_t)(km % 10));
+        *o = '\0';
+        UI_PrintStringSmallNormal(s, 0, 0, 3);
+
+        UI_PrintStringSmallNormal("UP/DN *HEX EXIT", 0, 0, 6);
+    } else if (g.hexView) {
         /* 8 bytes a row, four rows = 32 bytes a page. */
         for (uint8_t row = 0; row < 4u; row++) {
             o = s;
