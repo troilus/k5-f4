@@ -33,6 +33,14 @@ software.** This is the path the K1 LBJRadio uses, on the classic K5.
 - A DIAG page (long `STAR`) shows the same numbers the reference build shows:
   `R58/R59/R30`, `IRQ/FSK`, `FIF/OV/SYNC`, `OK/BAD/FIN`, band and profile.
 
+The reference build (`UVK5_F4HWN_LBJ17_RX630_840`) was disassembled: its UI
+text is an obfuscated table (`(byte ^ 0x37) - 1`, index at `0xDA94`, data at
+`0xD7F0`). That is where the field formats come from: `%02u/%02u`,
+`RIC:%07lu`, `L:%.4s-%.4s`, `E%.3s %.2s.%.4s`, `N%.2s %.2s.%.4s`,
+`R:%.2s T:%.3s`, `Z:%u V:%ukm/h`, `KM:%u.%u`, `UP/DN *HEX EXIT`. Its character
+alphabet is the same `0123456789*U -)(` this decoder uses, and it also reads
+exactly one FIFO word per interrupt.
+
 ## Attempts so far
 
 The TDCS receiver on this firmware already decodes real signals through the
@@ -101,7 +109,7 @@ for a better slicer, but it is no longer the only way in.
 
 ## Flash budget
 
-- Current LBJ build: **59632 bytes** with GCC 10.3 `-Os`, about **5.7 KiB
+- Current LBJ build: **59788 bytes** with GCC 10.3 `-Os`, about **5.6 KiB
   free**; the upstream `-Oz` build is a few hundred bytes smaller.
 - TDCS and LBJ do not fit together.
 
@@ -121,29 +129,30 @@ make ENABLE_TDCS=0 ENABLE_LBJ=1 ENABLE_LBJ_TX=0 TARGET=f4hwn.lbj
 
 ## Usage
 
-1. Set a VFO's modulation to `LBJ`. The main screen becomes the LBJ decode page.
-2. Screen layout:
-   - `A<short-block address> S<shift> D<address distance>`
-   - `IRQ xxxx ST xxxx`
-   - the first six FIFO words of the last batch
-   - the BCD message (two lines)
-   - `F<frames> C<profile> 5C=xx <order>`
-3. `UP` / `DOWN`: cycle the nine RX front-end profiles (C0-C8).
-4. `*`: cycle the reference bit-order flags `0..7` (bit 0 invert, bit 1
-   bit-reverse inside the byte, bit 2 swap the two bytes of the FIFO word).
-   `0`, the default, is low byte first / MSB first inside each byte - the same
-   order `TDCS_DecWord16()` uses and the one the LBJ17 reference build ships
-   with.
-5. Long `*`: the DIAG page (`R58/R59/R30`, `IRQ/FSK`, `FIF/OV/SYNC`,
-   `OK/BAD/FIN`, band, profile). `2` clears the counters. Expected on air:
-   `FIF` climbing with `OV 0`, then `SYNC` and `OK` climbing; `BAD` far above
-   `OK` means the front-end profile is wrong.
-6. `PTT`: swallowed when `ENABLE_LBJ_TX=0`; sends the fixed test frame when
+1. Set a VFO's modulation to `LBJ`. The main screen becomes the report viewer,
+   laid out like the LBJ17 reference build:
+   - `01/10` report index / count (`RIC:%07lu` on the next line)
+   - `RIC:1234000` the POCSAG address
+   - four 18-character lines of the decoded character stream
+   - `UP/DN *HEX EXIT`
+2. `UP` / `DOWN`: walk the ten stored reports (newest first).
+3. `6` / `9`: turn the page inside a report (72 characters, or 32 bytes in HEX).
+4. `*`: switch between the text and the HEX page.
+5. `EXIT`: drop the stored reports (a fresh capture starts on the next frame).
+6. Long `*`: the DIAG page (`R58/R59/R30`, `IRQ/FSK`, `FIF/OV/SYNC`,
+   `OK/BAD/FIN`, band, profile). On that page `UP`/`DOWN` cycle the nine RX
+   front-end profiles (C0-C8) and `*` cycles the reference bit-order flags
+   `0..7` (bit 0 invert, bit 1 bit-reverse inside the byte, bit 2 swap the two
+   bytes). `0`, the default, is low byte first / MSB first inside each byte -
+   the same order `TDCS_DecWord16()` uses and the one the LBJ17 build ships
+   with. `2` clears the counters. Expected on air: `FIF` climbing with `OV 0`,
+   then `SYNC` and `OK` climbing; `BAD` far above `OK` means the front-end
+   profile is wrong.
+7. `PTT`: swallowed when `ENABLE_LBJ_TX=0`; sends the fixed test frame when
    `ENABLE_LBJ_TX=1`.
-7. The FSK engine stops while the squelch is closed, so stale FIFO words cannot
-   pile up.
-8. The short block `1233999/1234000` is kept in its own buffer so the detail
-   block `1234001/1234002` cannot overwrite it.
+8. The FSK engine stops while the squelch is closed, so stale FIFO words cannot
+   pile up. A guard also stops it if the FIFO interrupt exceeds 400 a second
+   (1200 baud is 75), and the idle page then shows `OVR`.
 
 ## UART raw dump
 

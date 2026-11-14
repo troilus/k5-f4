@@ -62,6 +62,19 @@
 #define LBJ_REG59_RAW    0x1060u
 #endif
 
+/* One received report, as the reference firmware keeps them: the POCSAG
+ * address, the function, the length and the character stream the decoder
+ * produced (5 characters per codeword, up to LBJ_MSG_CHARS). */
+#define LBJ_MSG_MAX   10u
+#define LBJ_MSG_CHARS 60u
+
+typedef struct {
+    uint32_t addr;
+    uint8_t  func;
+    uint8_t  len;
+    char     txt[LBJ_MSG_CHARS + 1u];
+} lbj_msg_t;
+
 static struct {
     bool     on;
     bool     dirty;
@@ -87,12 +100,21 @@ static struct {
     uint16_t lostTicks;  /* 10 ms ticks the squelch has been closed */
     uint8_t  txState;    /* 0 idle, 1 sending, 2 sent, 3 denied    */
     uint16_t txTick;
+    /* Received reports, newest first, and the pager state. */
+    lbj_msg_t msg[LBJ_MSG_MAX];
+    uint8_t  mcount;
+    uint8_t  mcur;       /* report on screen                       */
+    uint8_t  page;       /* 18-character page inside that report   */
+    uint8_t  hexView;    /* 1 = the HEX page                       */
 #ifndef ENABLE_LBJ_HWSYNC
     /* Raw-mode diagnostics, the same numbers the reference DIAG page shows:
      * the interrupt mix, the FIFO word count and the decoder's own counters
      * (sync hits, BCH clean/repaired vs uncorrectable). */
     uint16_t irqCount, fskCount, otherCount, finCount;
     uint16_t fifoWords, ovCount;
+    uint16_t irqPerSec;  /* interrupts seen in the current second  */
+    uint16_t lastSec;    /* second the counter above belongs to    */
+    uint8_t  storm;      /* the engine was stopped by the guard    */
     uint8_t  diag;       /* 1 = the DIAG page is on screen          */
 #endif
 } g;
@@ -366,6 +388,9 @@ static void lbj_start(void)
     g.finCount   = 0u;
     g.fifoWords  = 0u;
     g.ovCount    = 0u;
+    g.irqPerSec  = 0u;
+    g.lastSec    = g.sec;
+    g.storm      = 0u;
 #endif
 
     const uint16_t mask = BK4819_ReadRegister(BK4819_REG_3F);
@@ -429,6 +454,29 @@ void lbj_emit_msg(const lbj_rx_t *r, const char *bcd, uint16_t len)
         g.bcdShort[n] = '\0';
         g.bcdShortLen = (uint8_t)n;
         g.shortAddr   = r->addr;
+    }
+
+    /* Keep the report in the pager ring, newest first (the reference firmware
+     * stores ten of them and walks them with UP/DN). */
+    {
+        uint16_t m = (n > LBJ_MSG_CHARS) ? LBJ_MSG_CHARS : n;
+        uint8_t  i;
+
+        for (i = (g.mcount < LBJ_MSG_MAX) ? g.mcount : (LBJ_MSG_MAX - 1u); i > 0u; i--)
+            g.msg[i] = g.msg[i - 1u];
+
+        g.msg[0].addr = r->addr;
+        g.msg[0].func = r->func;
+        g.msg[0].len  = (uint8_t)m;
+        memcpy(g.msg[0].txt, bcd, m);
+        g.msg[0].txt[m] = '\0';
+
+        if (g.mcount < LBJ_MSG_MAX)
+            g.mcount++;
+
+        g.mcur   = 0u;
+        g.page   = 0u;
+        g.hexView = 0u;
     }
 
 #ifndef ENABLE_LBJ_HWSYNC
@@ -605,21 +653,77 @@ bool LBJ_HandleKey(uint8_t key, bool pressed, bool held)
     if (!pressed || held)
         return false;
 
+    /* UP/DN walk the received reports, newest first, like the reference.  The
+     * RX profile and the bit-order flags move to the DIAG page so the main
+     * page stays a pure message viewer. */
     if (key == KEY_UP || key == KEY_DOWN) {
-        if (key == KEY_UP)
-            g.cfg = (uint8_t)((g.cfg + LBJ_CFG_COUNT - 1u) % LBJ_CFG_COUNT);
-        else
-            g.cfg = (uint8_t)((g.cfg + 1u) % LBJ_CFG_COUNT);
-        LBJ_StopSampler();
-        memset(&g.rx, 0, sizeof(g.rx));
+#ifdef ENABLE_LBJ_HWSYNC
+        const bool onDiag = true;      /* the batch build only has profiles */
+#else
+        const bool onDiag = g.diag != 0u;
+#endif
+
+        if (onDiag) {
+            if (key == KEY_UP)
+                g.cfg = (uint8_t)((g.cfg + LBJ_CFG_COUNT - 1u) % LBJ_CFG_COUNT);
+            else
+                g.cfg = (uint8_t)((g.cfg + 1u) % LBJ_CFG_COUNT);
+            LBJ_StopSampler();
+            memset(&g.rx, 0, sizeof(g.rx));
+        } else if (g.mcount) {
+            if (key == KEY_UP) {
+                g.mcur = (uint8_t)((g.mcur + g.mcount - 1u) % g.mcount);
+            } else {
+                g.mcur = (uint8_t)((g.mcur + 1u) % g.mcount);
+            }
+            g.page = 0u;
+        }
         g.dirty = true;
         return true;
     }
 
+    /* 6/9 turn the page inside the report. */
+    if (key == KEY_6 || key == KEY_9) {
+        const lbj_msg_t *m = g.mcount ? &g.msg[g.mcur % LBJ_MSG_MAX] : 0;
+        const uint16_t per = g.hexView ? 32u : 72u;
+        const uint16_t pages = m ? (uint16_t)((m->len + per - 1u) / per) : 0u;
+
+        if (pages > 1u) {
+            if (key == KEY_6) {
+                if (g.page > 0u)
+                    g.page--;
+            } else if ((uint16_t)(g.page + 1u) < pages) {
+                g.page++;
+            }
+            g.dirty = true;
+        }
+        return true;
+    }
+
     if (key == KEY_STAR) {
-        g.order = (uint8_t)((g.order + 1u) & 7u);
-        memset(&g.rx, 0, sizeof(g.rx));
+#ifdef ENABLE_LBJ_HWSYNC
+        const bool onDiag = true;
+#else
+        const bool onDiag = g.diag != 0u;
+#endif
+
+        if (onDiag) {
+            g.order = (uint8_t)((g.order + 1u) & 7u);
+            memset(&g.rx, 0, sizeof(g.rx));
+        } else {
+            g.hexView ^= 1u;
+            g.page = 0u;
+        }
         g.dirty = true;
+        return true;
+    }
+
+    if (key == KEY_EXIT) {
+        g.mcount  = 0u;
+        g.mcur    = 0u;
+        g.page    = 0u;
+        g.hexView = 0u;
+        g.dirty   = true;
         return true;
     }
 
@@ -630,7 +734,9 @@ bool LBJ_HandleKey(uint8_t key, bool pressed, bool held)
 
 /* One line per batch on the 2.5 mm K-head UART (38400 8N1).  The 32 FIFO
  * words are dumped raw, before rev16/inversion, so the PC can replay every
- * shift, bit order and polarity offline. */
+ * shift, bit order and polarity offline.  Off by default: UART_Send() spins
+ * on the TX FIFO, so it is only compiled in on request. */
+#ifdef ENABLE_LBJ_UART_DUMP
 static void lbj_dump_batch(void)
 {
     static uint16_t lastSec = 0xFFFFu;
@@ -675,6 +781,7 @@ static void lbj_dump_batch(void)
         UART_Send(line, (uint32_t)(o - line));
     }
 }
+#endif /* ENABLE_LBJ_UART_DUMP */
 
 #ifdef ENABLE_LBJ_HWSYNC
 /* Decode the words collected in g.raw.  `complete` means the engine reported
@@ -744,7 +851,9 @@ static uint8_t lbj_decode_batch(uint8_t nwords, bool complete)
 
         lbj_fsk_rearm();
         g.dirty = true;
+#ifdef ENABLE_LBJ_UART_DUMP
         lbj_dump_batch();
+#endif
     }
 
     return ncodewords;
@@ -831,27 +940,23 @@ void LBJ_HandleInterrupts(uint16_t bits)
     }
 #else
     g.irqCount++;
+    g.irqPerSec++;
 
     if (bits & LBJ_IRQ_FIFO) {
         g.fskCount++;
 
-        /* Drain everything the slicer handed over.  REG_5E bits 2:0 is the
-         * current FIFO level: with a one-word threshold it is normally 1, but
-         * a late main loop can leave more behind.  The guard stops a stuck
-         * level from spinning here forever. */
-        for (uint8_t guard = 0; guard < 32u; guard++) {
-            uint16_t n = BK4819_ReadRegister(BK4819_REG_5E) & 7u;
+        /* The reference firmware reads exactly one word per FIFO interrupt:
+         * REG_5E is programmed to a one-word threshold and its level field is
+         * not a reliable depth counter.  Reading a guessed count here could
+         * leave words in the FIFO and keep the interrupt line asserted, which
+         * starves the main loop and looks like a frozen radio. */
+        if ((BK4819_ReadRegister(BK4819_REG_5E) & 7u) >= 7u)
+            g.ovCount++;                    /* FIFO was full: a word may be lost */
 
-            if (!n)
-                break;
-            if (n >= 7u)          /* FIFO full: a word may have been lost */
-                g.ovCount++;
-            while (n--)
-                lbj_raw_word(BK4819_ReadRegister(BK4819_REG_5F));
-        }
+        lbj_raw_word(BK4819_ReadRegister(BK4819_REG_5F));
 
         /* Main-loop context, same as the TDCS decoder: run the BCH and the
-         * word state machine right after the words were queued. */
+         * word state machine right after the word was queued. */
         lbj_process(&g.rx);
     } else if (bits & (LBJ_IRQ_SYNC | LBJ_IRQ_DONE)) {
         g.finCount++;
@@ -923,11 +1028,24 @@ void LBJ_Tick(void)
     }
 
 #ifndef ENABLE_LBJ_HWSYNC
-    /* One raw-word dump per second on the K-head UART, the same format the
-     * batch build used: a capture can be replayed on the PC to check bit
-     * order and polarity offline.  lbj_dump_batch() self-limits to 1/s. */
+    /* Interrupt storm guard.  1200 baud is 75 words a second, so a few hundred
+     * interrupts means the engine is free-running: stop it instead of letting
+     * it starve the main loop (the screen would look frozen). */
+    if (g.on && g.sec != g.lastSec) {
+        g.lastSec = g.sec;
+        if (g.irqPerSec > 400u) {
+            g.storm = 1u;
+            LBJ_StopSampler();
+        }
+        g.irqPerSec = 0u;
+    }
+
+    /* Raw-word dump on the K-head UART for offline analysis.  Off by default:
+     * UART_Send() spins on the TX FIFO, so it must not run in the tick. */
+#ifdef ENABLE_LBJ_UART_DUMP
     if (g.on)
         lbj_dump_batch();
+#endif
 #endif
 
     if (g.dirty) {
@@ -1016,9 +1134,28 @@ static void lbj_draw_diag(void)
 }
 #endif /* !ENABLE_LBJ_HWSYNC */
 
+/* Zero-padded unsigned decimal, for RIC:%07lu and the %02u/%02u page. */
+static char *putpadn(char *o, uint32_t v, uint8_t n)
+{
+    char tmp[10];
+    uint8_t k = 0u;
+
+    do {
+        tmp[k++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    } while (v);
+
+    while (k < n)
+        tmp[k++] = '0';
+    while (k)
+        *o++ = tmp[--k];
+
+    return o;
+}
+
 void LBJ_Draw(void)
 {
-    char s[40];
+    char s[24];
     char *o;
 
     UI_DisplayClear();
@@ -1030,76 +1167,80 @@ void LBJ_Draw(void)
     }
 #endif
 
+    if (!g.mcount) {
+        /* Nothing decoded yet: keep the reference's idle page, but also show
+         * the counters so a silent receiver can be told from a deaf one. */
+        UI_PrintStringSmallNormal("LBJ POCSAG 1200 RX", 0, 0, 0);
+        UI_PrintStringSmallNormal("WAITING FOR POCSAG", 0, 0, 1);
+#ifndef ENABLE_LBJ_HWSYNC
+        o = s;
+        o = put(o, "SYNC ");
+        o = putu(o, lbj_stat_sync);
+        o = put(o, " FIF ");
+        o = putu(o, g.fifoWords);
+        o = put(o, g.storm ? " OVR" : "");
+        *o = '\0';
+        UI_PrintStringSmallNormal(s, 0, 0, 3);
+#endif
+        UI_PrintStringSmallNormal("UP/DN *HEX EXIT", 0, 0, 6);
+        ST7565_BlitStatusLine();
+        ST7565_BlitFullScreen();
+        return;
+    }
+
+    const lbj_msg_t *m = &g.msg[g.mcur % LBJ_MSG_MAX];
+
+    /* line 0: report index / count, like "%02u/%02u" */
     o = s;
-    o = put(o, "A");
-    if (g.shortAddr)
-        o = putu(o, g.shortAddr);
-    else
-        o = put(o, "-------");
-    o = put(o, " S");
-    o = putu(o, g.shift);
-    o = put(o, " D");
-    o = putu(o, g.addrDist);
+    o = putpadn(o, (uint32_t)g.mcur + 1u, 2u);
+    *o++ = '/';
+    o = putpadn(o, g.mcount, 2u);
+    if (g.hexView)
+        o = put(o, " HEX");
     *o = '\0';
     UI_PrintStringSmallNormal(s, 0, 0, 0);
 
+    /* line 1: the POCSAG address, "RIC:%07lu" */
     o = s;
-    o = put(o, "IRQ ");
-    o = puthex4(o, g.lastIrq);
-    o = put(o, " ST ");
-    o = puthex4(o, g.status);
+    o = put(o, "RIC:");
+    o = putpadn(o, m->addr, 7u);
     *o = '\0';
     UI_PrintStringSmallNormal(s, 0, 0, 1);
 
-    /* Three 16-bit words per row: four of them (19 chars, 133 px) run off
-     * the 128 px display and merge the last two words. */
-    for (uint8_t row = 0; row < 2u; row++) {
-        o = s;
-        for (uint8_t i = 0; i < 3u; i++) {
-            const uint8_t k = (uint8_t)(row * 3u + i);
-            if (k >= g.rawCount)
-                break;
-            o = puthex4(o, g.raw[k]);
-            *o++ = ' ';
-        }
-        *o = '\0';
-        UI_PrintStringSmallNormal(s, 0, 0, (uint8_t)(2u + row));
-    }
+    if (g.hexView) {
+        /* 8 bytes a row, four rows = 32 bytes a page. */
+        for (uint8_t row = 0; row < 4u; row++) {
+            o = s;
+            for (uint8_t i = 0; i < 8u; i++) {
+                const uint16_t k = (uint16_t)(g.page * 32u + row * 8u + i);
 
-    const char *bcd  = g.bcdShortLen ? g.bcdShort : g.bcd;
-    const uint8_t blen = g.bcdShortLen ? g.bcdShortLen : g.bcdLen;
-
-    if (blen) {
-        char line[20];
-        uint8_t n = (blen > 18u) ? 18u : blen;
-
-        memcpy(line, bcd, n);
-        line[n] = '\0';
-        UI_PrintStringSmallNormal(line, 0, 0, 4);
-
-        if (blen > 18u) {
-            n = (uint8_t)(blen - 18u);
-            if (n > 18u)
-                n = 18u;
-            memcpy(line, bcd + 18u, n);
-            line[n] = '\0';
-            UI_PrintStringSmallNormal(line, 0, 0, 5);
+                if (k >= m->len)
+                    break;
+                o = puthex2(o, (uint8_t)m->txt[k]);
+                *o++ = ' ';
+            }
+            *o = '\0';
+            UI_PrintStringSmallNormal(s, 0, 0, (uint8_t)(2u + row));
         }
     } else {
-        UI_PrintStringSmallNormal("WAIT SHORT...", 0, 0, 4);
+        /* 18 characters a row, four rows = 72 characters a page. */
+        for (uint8_t row = 0; row < 4u; row++) {
+            char line[20];
+            uint8_t n = 0u;
+
+            for (uint8_t i = 0; i < 18u; i++) {
+                const uint16_t k = (uint16_t)(g.page * 72u + row * 18u + i);
+
+                if (k >= m->len)
+                    break;
+                line[n++] = m->txt[k];
+            }
+            line[n] = '\0';
+            UI_PrintStringSmallNormal(line, 0, 0, (uint8_t)(2u + row));
+        }
     }
 
-    o = s;
-    o = put(o, "F");
-    o = putu(o, g.frames);
-    o = put(o, " C");
-    o = putu(o, g.cfg);
-    o = put(o, " 5C=");
-    o = puthex2(o, (uint8_t)LBJ_CFG[g.cfg % LBJ_CFG_COUNT].reg5c);
-    *o++ = ' ';
-    *o++ = (char)('0' + (g.order & 7u));   /* reference flags byte */
-    *o = '\0';
-    UI_PrintStringSmallNormal(s, 0, 0, 6);
+    UI_PrintStringSmallNormal("UP/DN *HEX EXIT", 0, 0, 6);
 
     ST7565_BlitStatusLine();
     ST7565_BlitFullScreen();
