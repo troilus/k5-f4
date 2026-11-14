@@ -19,7 +19,13 @@ software.** This is the path the K1 LBJRadio uses, on the classic K5.
 - `REG_59 = 0x1060`: FSK RX on (bit 12), 7-byte preamble (bits 6:4 = 6),
   **hardware sync length 0** (bits 3:0). The BK4819 is then only a 1200 baud
   slicer and every sliced word lands in the FIFO, so a slicer error can no
-  longer stop the frame from ever starting.
+  longer stop the frame from ever starting. The other registers are the LBJ17
+  reference values: `REG_43=0x3428`, `REG_58=0x00C1`, `REG_5C=0xAA30`,
+  `REG_5D=0xFFE0`, `REG_5E=0x0201`, `REG_70=0x00E0`, `REG_72=0x3065`,
+  `REG_3F=0x3002`, and the RX FIFO is cleared with `0x4060` before `0x1060`.
+- **Bit order**: low byte first, MSB first inside each byte - the same order
+  `TDCS_DecWord16()` uses. Feeding the 16-bit word MSB first (what this branch
+  did before) never matches the sync word.
 - `lbj_dec.c` hunts `0x7CD215D8` in the incoming bit stream (both polarities,
   up to 3 wrong bits), then runs the BCH and the POCSAG word state machine.
 - The old hardware-sync/`DONE` batch path is kept behind
@@ -95,8 +101,8 @@ for a better slicer, but it is no longer the only way in.
 
 ## Flash budget
 
-- Current LBJ build: **59492 bytes** with GCC 10.3 `-Os`, about **6.0 KiB
-  free**; the upstream `-Oz` build is ~58992 bytes.
+- Current LBJ build: **59632 bytes** with GCC 10.3 `-Os`, about **5.7 KiB
+  free**; the upstream `-Oz` build is a few hundred bytes smaller.
 - TDCS and LBJ do not fit together.
 
 ## Build
@@ -123,7 +129,11 @@ make ENABLE_TDCS=0 ENABLE_LBJ=1 ENABLE_LBJ_TX=0 TARGET=f4hwn.lbj
    - the BCD message (two lines)
    - `F<frames> C<profile> 5C=xx <order>`
 3. `UP` / `DOWN`: cycle the nine RX front-end profiles (C0-C8).
-4. `*`: cycle bit order/polarity `M/L/I/J`.
+4. `*`: cycle the reference bit-order flags `0..7` (bit 0 invert, bit 1
+   bit-reverse inside the byte, bit 2 swap the two bytes of the FIFO word).
+   `0`, the default, is low byte first / MSB first inside each byte - the same
+   order `TDCS_DecWord16()` uses and the one the LBJ17 reference build ships
+   with.
 5. Long `*`: the DIAG page (`R58/R59/R30`, `IRQ/FSK`, `FIF/OV/SYNC`,
    `OK/BAD/FIN`, band, profile). `2` clears the counters. Expected on air:
    `FIF` climbing with `OV 0`, then `SYNC` and `OK` climbing; `BAD` far above

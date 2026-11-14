@@ -5,9 +5,10 @@
 
 #define POC_SYNC      0x7CD215D8u
 #define POC_IDLE      2055848343u
-#define SYNC_ERR      3u        /* wrong bits tolerated in a sync word.  The
-                                 * real LBJ sync can arrive with 3 bit errors;
-                                 * the address filter rejects false frames. */
+#define SYNC_ERR      2u        /* wrong bits tolerated in a sync word.  The
+                                 * reference LBJ17 build accepts a Hamming
+                                 * distance of 2 (polarity folded in); the
+                                 * address filter rejects false frames. */
 
 /* Diagnostics for the LBJ DIAG page: sync hits and BCH outcomes.  Plain
  * counters, written from the main loop only. */

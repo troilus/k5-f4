@@ -81,7 +81,7 @@ static struct {
     uint32_t addr;
     uint32_t lastFreq;
     uint8_t  cfg;        /* LBJ_CFG index                          */
-    uint8_t  order;      /* 0 M, 1 L, 2 I, 3 J (bit 0 LSB, bit 1 inverted) */
+    uint8_t  order;      /* reference flags: 0 invert, 1 bit-reverse, 2 swap */
     uint8_t  shift;      /* bit offset of the closest known address */
     uint8_t  addrDist;   /* Hamming distance to that address word   */
     uint16_t lostTicks;  /* 10 ms ticks the squelch has been closed */
@@ -111,7 +111,7 @@ typedef struct {
 } lbj_cfg_t;
 
 static const lbj_cfg_t LBJ_CFG[] = {
-    { 0x00C1u, 0xAA30u, 0x00E0u, 0x3628u, 0u },  /* 0: current AirCopy values   */
+    { 0x00C1u, 0xAA30u, 0x00E0u, 0x3428u, 0u },  /* 0: LBJ17 reference values   */
     { 0x00C1u, 0x5625u, 0x00E0u, 0x3628u, 0u },  /* 1: TDCS real-signal clock   */
     { 0x37C3u, 0xAA30u, 0x00E0u, 0x3628u, 0u },  /* 2: Roger MDC RX, gain 11    */
     { 0x37C3u, 0x5625u, 0x00E0u, 0x3628u, 0u },  /* 3: combination              */
@@ -167,6 +167,7 @@ static char *puthex2(char *o, uint8_t v)
     return o;
 }
 
+#ifdef ENABLE_LBJ_HWSYNC
 /* Some BK4819 parts shift each FIFO word out LSB first.  rev16 turns the
  * received word back into the MSB-first air order POCSAG uses. */
 static uint16_t rev16(uint16_t v)
@@ -176,6 +177,7 @@ static uint16_t rev16(uint16_t v)
     v = (uint16_t)(((v & 0x0F0Fu) << 4) | ((v >> 4) & 0x0F0Fu));
     return (uint16_t)((v << 8) | (v >> 8));
 }
+#endif
 
 #ifdef ENABLE_LBJ_HWSYNC
 /* Bit at index `i` of the 512-bit batch payload, MSB first inside each word. */
@@ -301,7 +303,12 @@ static void lbj_fsk_rearm(void)
 /* Program the BK4819 as a plain slicer: FSK RX on, hardware sync off, FIFO
  * almost-full at one word so the main loop sees every sliced word.  Called
  * once per start, not per batch - the engine stays up until the squelch
- * closes, the channel changes or PTT is pressed. */
+ * closes, the channel changes or PTT is pressed.
+ *
+ * The register values are copied from the LBJ17 reference firmware (F4HWN
+ * v4.3 with the LBJ receive patch), so the slicer sees exactly the same
+ * signal path.  REG_5A/5B are unused with the hardware sync off but are set
+ * to its values anyway; REG_5D is its continuous-mode length. */
 static void lbj_raw_config(const lbj_cfg_t *c)
 {
     BK4819_ResetFSK();                    /* REG_3F = 0, REG_59 = 0x0068, idle */
@@ -314,9 +321,16 @@ static void lbj_raw_config(const lbj_cfg_t *c)
     BK4819_RX_TurnOn();                   /* REG_30 = the RX chain (BFF1)  */
     lbj_apply_frontend(c);
 
-    /* One-word FIFO threshold and no hardware sync: REG_5D/5A/5B are unused
-     * in this mode, REG_59 goes last so the FIFO starts clean. */
-    BK4819_WriteRegister(BK4819_REG_5E, 0x0201u);
+    BK4819_WriteRegister(BK4819_REG_43, c->reg43);  /* IF filter             */
+    BK4819_WriteRegister(BK4819_REG_5A, 0xAAAAu);
+    BK4819_WriteRegister(BK4819_REG_5B, 0xAAAAu);
+    BK4819_WriteRegister(BK4819_REG_5D, 0xFFE0u);
+    BK4819_WriteRegister(BK4819_REG_5E, 0x0201u);   /* FIFO almost-full: 1   */
+
+    /* Clear the RX FIFO, then enable FSK RX with the hardware sync length at
+     * zero (0x1060) - the reference restart sequence. */
+    BK4819_WriteRegister(BK4819_REG_02, 0x0000u);
+    BK4819_WriteRegister(BK4819_REG_59, 0x4060u);
     BK4819_WriteRegister(BK4819_REG_59, LBJ_REG59_RAW);
 }
 #endif /* ENABLE_LBJ_HWSYNC */
@@ -603,7 +617,7 @@ bool LBJ_HandleKey(uint8_t key, bool pressed, bool held)
     }
 
     if (key == KEY_STAR) {
-        g.order = (uint8_t)((g.order + 1u) & 3u);
+        g.order = (uint8_t)((g.order + 1u) & 7u);
         memset(&g.rx, 0, sizeof(g.rx));
         g.dirty = true;
         return true;
@@ -633,7 +647,7 @@ static void lbj_dump_batch(void)
     o = put(o, "LBJ C");
     o = putu(o, g.cfg);
     *o++ = ' ';
-    *o++ = "MLIJ"[g.order & 3u];
+    *o++ = (char)('0' + (g.order & 7u));
     o = put(o, " S");
     o = putu(o, g.shift);
     o = put(o, " D");
@@ -672,8 +686,8 @@ static uint8_t lbj_decode_batch(uint8_t nwords, bool complete)
     if (nwords < 2u)
         return 0u;
 
-    const bool lsb = (g.order & 1u) != 0u;
-    const bool inv = (g.order & 2u) != 0u;
+    const bool lsb = (g.order & 2u) != 0u;   /* bit-reverse inside the byte */
+    const bool inv = (g.order & 1u) != 0u;
 
     /* Rebuild the batch in air order, then let the BCH score all 32 bit
      * offsets.  The hardware sync can be one or more bits away from the real
@@ -738,9 +752,32 @@ static uint8_t lbj_decode_batch(uint8_t nwords, bool complete)
 #endif /* ENABLE_LBJ_HWSYNC */
 
 #ifndef ENABLE_LBJ_HWSYNC
-/* Push one sliced word into the decoder in air order.  g.order keeps the
- * MSB/LSB and normal/inverted variants the batch path had, so a wrong FIFO bit
- * order or a wrong polarity is still one STAR press away. */
+/* Bit-reverse one byte.  The FIFO bit order is not fixed across BK4819 parts,
+ * so the reference build exposes the same three transformations as flags. */
+static uint8_t rev8(uint8_t v)
+{
+    v = (uint8_t)(((v & 0x55u) << 1) | ((v >> 1) & 0x55u));
+    v = (uint8_t)(((v & 0x33u) << 2) | ((v >> 2) & 0x33u));
+    return (uint8_t)((v << 4) | (v >> 4));
+}
+
+/* Feed one byte in air order: MSB first inside the byte.  g.order is the
+ * reference flags byte - bit 0 invert, bit 1 bit-reverse inside the byte,
+ * bit 2 swap the two bytes of the FIFO word.  Order 0, the default and the
+ * one the reference build ships with, is therefore "low byte first, MSB
+ * first inside each byte", exactly what TDCS_DecWord16() does. */
+static void lbj_feed_byte(uint8_t b)
+{
+    if (g.order & 2u)
+        b = rev8(b);
+    if (g.order & 1u)
+        b = (uint8_t)~b;
+
+    for (int i = 7; i >= 0; i--)
+        lbj_rx_bit(&g.rx, (uint8_t)((b >> i) & 1u));
+}
+
+/* Push one sliced word into the decoder in air order. */
 static void lbj_raw_word(uint16_t w)
 {
     /* Keep the last 32 words for the raw row and the UART dump. */
@@ -750,13 +787,18 @@ static void lbj_raw_word(uint16_t w)
     if (g.rawCount < LBJ_BATCH_WORDS)
         g.rawCount++;
 
-    if (g.order & 1u)
-        w = rev16(w);
-    if (g.order & 2u)
-        w = (uint16_t)~w;
+    uint8_t lo = (uint8_t)w;
+    uint8_t hi = (uint8_t)(w >> 8);
 
-    for (int b = 15; b >= 0; b--)
-        lbj_rx_bit(&g.rx, (uint8_t)((w >> b) & 1u));
+    if (g.order & 4u) {
+        const uint8_t t = lo;
+
+        lo = hi;
+        hi = t;
+    }
+
+    lbj_feed_byte(lo);
+    lbj_feed_byte(hi);
 
     g.fifoWords++;
 }
@@ -963,7 +1005,7 @@ static void lbj_draw_diag(void)
     o = put(o, " C");
     o = putu(o, g.cfg);
     o = put(o, " M");
-    *o++ = "MLIJ"[g.order & 3u];
+    *o++ = (char)('0' + (g.order & 7u));
     *o = '\0';
     UI_PrintStringSmallNormal(s, 0, 0, 5);
 
@@ -1054,9 +1096,8 @@ void LBJ_Draw(void)
     o = putu(o, g.cfg);
     o = put(o, " 5C=");
     o = puthex2(o, (uint8_t)LBJ_CFG[g.cfg % LBJ_CFG_COUNT].reg5c);
-    static const char ORDER_CHAR[] = "MLIJ";
     *o++ = ' ';
-    *o++ = ORDER_CHAR[g.order & 3u];
+    *o++ = (char)('0' + (g.order & 7u));   /* reference flags byte */
     *o = '\0';
     UI_PrintStringSmallNormal(s, 0, 0, 6);
 
