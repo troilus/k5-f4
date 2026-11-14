@@ -9,6 +9,10 @@
                                  * real LBJ sync can arrive with 3 bit errors;
                                  * the address filter rejects false frames. */
 
+/* Diagnostics for the LBJ DIAG page: sync hits and BCH outcomes.  Plain
+ * counters, written from the main loop only. */
+uint16_t lbj_stat_sync, lbj_stat_ok, lbj_stat_bad;
+
 /* 32-bit popcount without a hardware instruction. */
 static uint8_t pc32(uint32_t x)
 {
@@ -139,8 +143,10 @@ void lbj_rx_bit(lbj_rx_t *r, uint8_t bit)
         uint8_t e = pc32(r->sr ^ POC_SYNC);
         if (e <= SYNC_ERR) {
             r->pol = 1u; r->state = 1u; r->nb = 0u; r->hunt = 0u; r->synced = 1u;
+            lbj_stat_sync++;
         } else if (e >= 32u - SYNC_ERR) {
             r->pol = 0u; r->state = 1u; r->nb = 0u; r->hunt = 0u; r->synced = 1u;
+            lbj_stat_sync++;
         } else if (r->inmsg) {
             if (++r->hunt > 64u)
                 r->flushReq = 1u;    /* message not closed by sync/idle/batch end */
@@ -187,6 +193,11 @@ void lbj_process(lbj_rx_t *r)
 
         uint32_t cor;
         uint8_t st = bch_dec(raw, &cor);        /* 0 clean, 1 repaired, 2 bad */
+
+        if (st == 2u)
+            lbj_stat_bad++;
+        else
+            lbj_stat_ok++;
 
         r->fp++;
         r->wc++;

@@ -66,6 +66,10 @@ ENABLE_TDCS                   	?= 1
 ENABLE_TDCS_TX                	?= 0
 ENABLE_LBJ                    	?= 0
 ENABLE_LBJ_TX                 	?= 0
+# 0 = raw FSK: the BK4819 is only a 1200 baud slicer, sync/BCH in software
+#     (the default, and the only mode that decodes the real signal)
+# 1 = the old hardware-sync/DONE batch path, kept for A/B comparison
+ENABLE_LBJ_HWSYNC             	?= 0
 
 
 # ---- DEBUGGING ----
@@ -437,6 +441,9 @@ ifeq ($(ENABLE_LBJ),1)
 endif
 ifeq ($(ENABLE_LBJ_TX),1)
 	CFLAGS  += -DENABLE_LBJ_TX
+endif
+ifeq ($(ENABLE_LBJ_HWSYNC),1)
+	CFLAGS  += -DENABLE_LBJ_HWSYNC
 endif
 ifeq ($(ENABLE_AGC_SHOW_DATA),1)
 	CFLAGS  += -DENABLE_AGC_SHOW_DATA

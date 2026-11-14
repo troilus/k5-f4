@@ -5,9 +5,11 @@
  * engine in direct-FSK 1.2K mode (the AirCopy engine) and feeds the FIFO
  * codewords to the K1 POCSAG decoder (lbj_dec.c).
  *
- * This is the first, diagnostic build: it prints the raw FIFO words and the
- * decoded BCD string, so the bit order and the sync can be checked on air
- * before the report parser and the Chinese popup are added.
+ * The default path is raw FSK: REG_59 = 0x1060 turns the hardware sync off,
+ * so the engine only slices at 1200 baud and every word reaches the FIFO.
+ * lbj_dec.c hunts the sync word, the polarity and the BCH in software, which
+ * is what makes the real signal decodable on the stock hardware.  The old
+ * hardware-sync batch path is kept behind ENABLE_LBJ_HWSYNC=1.
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -46,6 +48,20 @@
 #define POCSAG_SYNC      0x7CD215D8u
 #define POCSAG_IDLE      0x7A89C197u
 
+/* Raw FSK mode is the default.  REG_59 = 0x1060 keeps the FSK receiver on
+ * (bit 12) and the 7-byte preamble (bits 6:4 = 6), but leaves the hardware
+ * sync length at 0.  The BK4819 then behaves as a plain 1200 baud slicer: every
+ * sliced word lands in the FIFO, no sync has to match in hardware, and
+ * lbj_dec.c hunts the POCSAG sync word, the polarity and the BCH in software.
+ * That is how the K1 LBJRadio works and it is the only path that survives the
+ * hardware slicer's error rate on the real signal.
+ *
+ * Build with ENABLE_LBJ_HWSYNC=1 to get the old hardware-sync/DONE batch path
+ * back for an A/B comparison. */
+#ifndef ENABLE_LBJ_HWSYNC
+#define LBJ_REG59_RAW    0x1060u
+#endif
+
 static struct {
     bool     on;
     bool     dirty;
@@ -71,6 +87,14 @@ static struct {
     uint16_t lostTicks;  /* 10 ms ticks the squelch has been closed */
     uint8_t  txState;    /* 0 idle, 1 sending, 2 sent, 3 denied    */
     uint16_t txTick;
+#ifndef ENABLE_LBJ_HWSYNC
+    /* Raw-mode diagnostics, the same numbers the reference DIAG page shows:
+     * the interrupt mix, the FIFO word count and the decoder's own counters
+     * (sync hits, BCH clean/repaired vs uncorrectable). */
+    uint16_t irqCount, fskCount, otherCount, finCount;
+    uint16_t fifoWords, ovCount;
+    uint8_t  diag;       /* 1 = the DIAG page is on screen          */
+#endif
 } g;
 
 /* RX tuning table.  The real LBJ signal does not decode with the AirCopy
@@ -153,6 +177,7 @@ static uint16_t rev16(uint16_t v)
     return (uint16_t)((v << 8) | (v >> 8));
 }
 
+#ifdef ENABLE_LBJ_HWSYNC
 /* Bit at index `i` of the 512-bit batch payload, MSB first inside each word. */
 static uint8_t lbj_payload_bit(const uint16_t *w, uint16_t i)
 {
@@ -221,6 +246,7 @@ static uint8_t lbj_measure_addr(const uint16_t *w, bool inv, uint8_t *shift)
     *shift = bestS;
     return bestD;
 }
+#endif /* ENABLE_LBJ_HWSYNC */
 
 /* ---- FSK engine -------------------------------------------------------- */
 
@@ -256,6 +282,7 @@ static void lbj_apply_frontend(const lbj_cfg_t *c)
     }
 }
 
+#ifdef ENABLE_LBJ_HWSYNC
 static void lbj_fsk_rearm(void)
 {
     /* Full AirCopy-style reset between batches.  The light 0x4068/0x3068
@@ -270,6 +297,29 @@ static void lbj_fsk_rearm(void)
     const uint16_t mask = BK4819_ReadRegister(BK4819_REG_3F);
     BK4819_WriteRegister(BK4819_REG_3F, (uint16_t)(mask | LBJ_IRQ_MASK));
 }
+#else
+/* Program the BK4819 as a plain slicer: FSK RX on, hardware sync off, FIFO
+ * almost-full at one word so the main loop sees every sliced word.  Called
+ * once per start, not per batch - the engine stays up until the squelch
+ * closes, the channel changes or PTT is pressed. */
+static void lbj_raw_config(const lbj_cfg_t *c)
+{
+    BK4819_ResetFSK();                    /* REG_3F = 0, REG_59 = 0x0068, idle */
+
+    BK4819_WriteRegister(BK4819_REG_70, c->reg70);
+    BK4819_WriteRegister(BK4819_REG_72, 0x3065u);   /* tone2 1200 baud       */
+    BK4819_WriteRegister(BK4819_REG_58, c->reg58);
+    BK4819_WriteRegister(BK4819_REG_5C, c->reg5c);
+
+    BK4819_RX_TurnOn();                   /* REG_30 = the RX chain (BFF1)  */
+    lbj_apply_frontend(c);
+
+    /* One-word FIFO threshold and no hardware sync: REG_5D/5A/5B are unused
+     * in this mode, REG_59 goes last so the FIFO starts clean. */
+    BK4819_WriteRegister(BK4819_REG_5E, 0x0201u);
+    BK4819_WriteRegister(BK4819_REG_59, LBJ_REG59_RAW);
+}
+#endif /* ENABLE_LBJ_HWSYNC */
 
 static void lbj_start(void)
 {
@@ -280,6 +330,7 @@ static void lbj_start(void)
 
     const lbj_cfg_t *c = &LBJ_CFG[g.cfg % LBJ_CFG_COUNT];
 
+#ifdef ENABLE_LBJ_HWSYNC
     BK4819_ResetFSK();
 
     /* Direct FSK 1.2K, 1200 baud, POCSAG sync, no CRC, 64-byte payload. */
@@ -292,6 +343,16 @@ static void lbj_start(void)
 
     BK4819_PrepareFSKReceive();
     lbj_apply_frontend(c);
+#else
+    lbj_raw_config(c);
+
+    g.irqCount   = 0u;
+    g.fskCount   = 0u;
+    g.otherCount = 0u;
+    g.finCount   = 0u;
+    g.fifoWords  = 0u;
+    g.ovCount    = 0u;
+#endif
 
     const uint16_t mask = BK4819_ReadRegister(BK4819_REG_3F);
     BK4819_WriteRegister(BK4819_REG_3F, (uint16_t)(mask | LBJ_IRQ_MASK));
@@ -302,7 +363,9 @@ static void lbj_start(void)
     g.lastFreq = gRxVfo->pRX->Frequency;
 }
 
+#ifdef ENABLE_LBJ_HWSYNC
 static uint8_t lbj_decode_batch(uint8_t nwords, bool complete);
+#endif
 
 void LBJ_StopSampler(void)
 {
@@ -313,7 +376,11 @@ void LBJ_StopSampler(void)
      * a squelch close can land in the last codewords of a batch, and then the
      * hardware re-arm never runs: decode the complete codewords we have so the
      * report is not lost.  No re-arm and no dump on this path. */
+#ifdef ENABLE_LBJ_HWSYNC
     lbj_decode_batch(g.fill, false);
+#else
+    lbj_process(&g.rx);      /* close the report the stream is in the middle of */
+#endif
 
     g.on = false;
 
@@ -349,6 +416,10 @@ void lbj_emit_msg(const lbj_rx_t *r, const char *bcd, uint16_t len)
         g.bcdShortLen = (uint8_t)n;
         g.shortAddr   = r->addr;
     }
+
+#ifndef ENABLE_LBJ_HWSYNC
+    g.frames++;          /* raw mode: one report, not one hardware batch */
+#endif
 
     g.dirty  = true;
 }
@@ -492,6 +563,31 @@ bool LBJ_HandleKey(uint8_t key, bool pressed, bool held)
         return true;      /* receive-only build: swallow PTT */
     }
 
+#ifndef ENABLE_LBJ_HWSYNC
+    /* Long STAR press: the DIAG page with the same numbers the reference build
+     * shows.  KEY_2 zeroes the counters so a capture starts from a clean
+     * state.  Both are raw-mode only; the batch path has nothing to show. */
+    if (key == KEY_STAR && held) {
+        g.diag ^= 1u;
+        g.dirty = true;
+        return true;
+    }
+    if (key == KEY_2 && pressed && !held) {
+        g.irqCount   = 0u;
+        g.fskCount   = 0u;
+        g.otherCount = 0u;
+        g.finCount   = 0u;
+        g.fifoWords  = 0u;
+        g.ovCount    = 0u;
+        g.frames     = 0u;
+        lbj_stat_sync = 0u;
+        lbj_stat_ok   = 0u;
+        lbj_stat_bad  = 0u;
+        g.dirty = true;
+        return true;
+    }
+#endif
+
     if (!pressed || held)
         return false;
 
@@ -566,6 +662,7 @@ static void lbj_dump_batch(void)
     }
 }
 
+#ifdef ENABLE_LBJ_HWSYNC
 /* Decode the words collected in g.raw.  `complete` means the engine reported
  * the end of the batch: the raw words are shown, the batch counter advances,
  * the engine is re-armed and the capture is dumped.  A stop-time flush passes
@@ -638,6 +735,32 @@ static uint8_t lbj_decode_batch(uint8_t nwords, bool complete)
 
     return ncodewords;
 }
+#endif /* ENABLE_LBJ_HWSYNC */
+
+#ifndef ENABLE_LBJ_HWSYNC
+/* Push one sliced word into the decoder in air order.  g.order keeps the
+ * MSB/LSB and normal/inverted variants the batch path had, so a wrong FIFO bit
+ * order or a wrong polarity is still one STAR press away. */
+static void lbj_raw_word(uint16_t w)
+{
+    /* Keep the last 32 words for the raw row and the UART dump. */
+    for (uint8_t i = 0; i + 1u < LBJ_BATCH_WORDS; i++)
+        g.raw[i] = g.raw[i + 1u];
+    g.raw[LBJ_BATCH_WORDS - 1u] = w;
+    if (g.rawCount < LBJ_BATCH_WORDS)
+        g.rawCount++;
+
+    if (g.order & 1u)
+        w = rev16(w);
+    if (g.order & 2u)
+        w = (uint16_t)~w;
+
+    for (int b = 15; b >= 0; b--)
+        lbj_rx_bit(&g.rx, (uint8_t)((w >> b) & 1u));
+
+    g.fifoWords++;
+}
+#endif /* !ENABLE_LBJ_HWSYNC */
 
 void LBJ_HandleInterrupts(uint16_t bits)
 {
@@ -646,6 +769,7 @@ void LBJ_HandleInterrupts(uint16_t bits)
 
     g.lastIrq = bits;
 
+#ifdef ENABLE_LBJ_HWSYNC
     /* Drain the FIFO as words arrive: the engine's FIFO is much smaller than
      * one 68-byte batch, so waiting for the finished interrupt would lose
      * most of it.  REG_5E is programmed to a one-word threshold. */
@@ -663,6 +787,36 @@ void LBJ_HandleInterrupts(uint16_t bits)
 
         lbj_decode_batch(LBJ_BATCH_WORDS, true);
     }
+#else
+    g.irqCount++;
+
+    if (bits & LBJ_IRQ_FIFO) {
+        g.fskCount++;
+
+        /* Drain everything the slicer handed over.  REG_5E bits 2:0 is the
+         * current FIFO level: with a one-word threshold it is normally 1, but
+         * a late main loop can leave more behind.  The guard stops a stuck
+         * level from spinning here forever. */
+        for (uint8_t guard = 0; guard < 32u; guard++) {
+            uint16_t n = BK4819_ReadRegister(BK4819_REG_5E) & 7u;
+
+            if (!n)
+                break;
+            if (n >= 7u)          /* FIFO full: a word may have been lost */
+                g.ovCount++;
+            while (n--)
+                lbj_raw_word(BK4819_ReadRegister(BK4819_REG_5F));
+        }
+
+        /* Main-loop context, same as the TDCS decoder: run the BCH and the
+         * word state machine right after the words were queued. */
+        lbj_process(&g.rx);
+    } else if (bits & (LBJ_IRQ_SYNC | LBJ_IRQ_DONE)) {
+        g.finCount++;
+    } else {
+        g.otherCount++;
+    }
+#endif
 }
 
 /* ---- tick -------------------------------------------------------------- */
@@ -726,6 +880,14 @@ void LBJ_Tick(void)
         }
     }
 
+#ifndef ENABLE_LBJ_HWSYNC
+    /* One raw-word dump per second on the K-head UART, the same format the
+     * batch build used: a capture can be replayed on the PC to check bit
+     * order and polarity offline.  lbj_dump_batch() self-limits to 1/s. */
+    if (g.on)
+        lbj_dump_batch();
+#endif
+
     if (g.dirty) {
         g.dirty        = false;
         gUpdateDisplay = true;
@@ -734,12 +896,97 @@ void LBJ_Tick(void)
 
 /* ---- screen ------------------------------------------------------------ */
 
+#ifndef ENABLE_LBJ_HWSYNC
+/* The reference DIAG page: the same registers and counters, so a capture can
+ * be compared field by field with the build that decodes. */
+static void lbj_draw_diag(void)
+{
+    char s[24];
+    char *o;
+
+    o = s;
+    o = put(o, "R58:");
+    o = puthex4(o, BK4819_ReadRegister(BK4819_REG_58));
+    o = put(o, " R59:");
+    o = puthex4(o, BK4819_ReadRegister(BK4819_REG_59));
+    *o = '\0';
+    UI_PrintStringSmallNormal(s, 0, 0, 0);
+
+    const int16_t dbm = BK4819_GetRSSI_dBm();
+
+    o = s;
+    o = put(o, "R30:");
+    o = puthex4(o, BK4819_ReadRegister(BK4819_REG_30));
+    o = put(o, " R");
+    o = putu(o, BK4819_GetRSSI());
+    *o++ = ' ';
+    if (dbm < 0) {
+        *o++ = '-';
+        o = putu(o, (uint32_t)(-dbm));
+    } else {
+        o = putu(o, (uint32_t)dbm);
+    }
+    *o = '\0';
+    UI_PrintStringSmallNormal(s, 0, 0, 1);
+
+    o = s;
+    o = put(o, "IRQ ");
+    o = putu(o, g.irqCount);
+    o = put(o, " FSK ");
+    o = putu(o, g.fskCount);
+    *o = '\0';
+    UI_PrintStringSmallNormal(s, 0, 0, 2);
+
+    o = s;
+    o = put(o, "FIF ");
+    o = putu(o, g.fifoWords);
+    o = put(o, " OV ");
+    o = putu(o, g.ovCount);
+    o = put(o, " SYNC ");
+    o = putu(o, lbj_stat_sync);
+    *o = '\0';
+    UI_PrintStringSmallNormal(s, 0, 0, 3);
+
+    o = s;
+    o = put(o, "OK ");
+    o = putu(o, lbj_stat_ok);
+    o = put(o, " BAD ");
+    o = putu(o, lbj_stat_bad);
+    o = put(o, " FIN ");
+    o = putu(o, g.finCount);
+    *o = '\0';
+    UI_PrintStringSmallNormal(s, 0, 0, 4);
+
+    o = s;
+    o = put(o, "B");
+    o = putu(o, (uint32_t)gRxVfo->Band + 1u);
+    o = put(o, " C");
+    o = putu(o, g.cfg);
+    o = put(o, " M");
+    *o++ = "MLIJ"[g.order & 3u];
+    *o = '\0';
+    UI_PrintStringSmallNormal(s, 0, 0, 5);
+
+    UI_PrintStringSmallNormal("STAR:DIAG 2:CLR", 0, 0, 6);
+
+    ST7565_BlitStatusLine();
+    ST7565_BlitFullScreen();
+}
+#endif /* !ENABLE_LBJ_HWSYNC */
+
 void LBJ_Draw(void)
 {
     char s[40];
     char *o;
 
     UI_DisplayClear();
+
+#ifndef ENABLE_LBJ_HWSYNC
+    if (g.diag) {
+        lbj_draw_diag();
+        return;
+    }
+#endif
 
     o = s;
     o = put(o, "A");

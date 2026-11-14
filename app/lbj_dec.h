@@ -43,6 +43,9 @@ typedef struct {
 void lbj_rx_bit(lbj_rx_t *r, uint8_t bit);   /* ISR context: align + queue     */
 void lbj_process(lbj_rx_t *r);               /* main loop: BCH + state machine */
 
+/* DIAG counters: sync words found, codewords that passed / failed the BCH. */
+extern uint16_t lbj_stat_sync, lbj_stat_ok, lbj_stat_bad;
+
 /* Provided by lbj_dual.c: one call per completed report. */
 void lbj_emit_msg(const lbj_rx_t *r, const char *bcd, uint16_t len);
 

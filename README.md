@@ -11,19 +11,21 @@ classic UV-K5 without a K1, a PC, or an external module.
   correction, sync tolerance 3, 0..31 bit-shift search.
 - Modulation: `MODULATION_LBJ`, receive-only; TX is disabled by default.
 
-## Status (important)
+## Status
 
-**This is a diagnostic/WIP branch, not a finished decoder.**
+**Raw-FSK build: the BK4819 hardware sync is off, the sync word is hunted in
+software.** This is the path the K1 LBJRadio uses, on the classic K5.
 
-- The decoder core is verified: K1's `model_rx.py` decodes both real IQ
-  recordings with **16/16 clean codewords, 0 errors**.
-- The radio itself does not decode the real signal yet. The BK4819 hardware
-  slicer produces **6-7 bit errors per 32-bit codeword (~19% BER)** on this
-  +/-2.3 kHz signal; 2-bit BCH cannot recover that.
-- The screen usually shows `WAIT SHORT...` or `A-------`. The raw FIFO shows
-  sync/address distances around D5-D8.
-- Next step: **PA9 audio tap + K1 software demod** (low-pass, matched filter,
-  adaptive threshold, DPLL). Not implemented yet.
+- `REG_59 = 0x1060`: FSK RX on (bit 12), 7-byte preamble (bits 6:4 = 6),
+  **hardware sync length 0** (bits 3:0). The BK4819 is then only a 1200 baud
+  slicer and every sliced word lands in the FIFO, so a slicer error can no
+  longer stop the frame from ever starting.
+- `lbj_dec.c` hunts `0x7CD215D8` in the incoming bit stream (both polarities,
+  up to 3 wrong bits), then runs the BCH and the POCSAG word state machine.
+- The old hardware-sync/`DONE` batch path is kept behind
+  `ENABLE_LBJ_HWSYNC=1` for an A/B comparison; it is not the default.
+- A DIAG page (long `STAR`) shows the same numbers the reference build shows:
+  `R58/R59/R30`, `IRQ/FSK`, `FIF/OV/SYNC`, `OK/BAD/FIN`, band and profile.
 
 ## Attempts so far
 
@@ -75,24 +77,27 @@ BK4819 FSK engine, so LBJ started from the same path:
   showing the measured shift. Fixed: the decoder now uses the measured shift,
   so `S<shift>` matches what was decoded.
 
-## Why it is blocked
+## Why the hardware-sync path could not work
 
 The BK4819 FSK engine has a fixed hardware slicer: no matched filter, no
 adaptive threshold and no DPLL. This signal's +/-2.3 kHz deviation leaves too
-little margin at the slicer, so every codeword arrives with 6-7 bit errors and
-2-bit BCH cannot recover it. More register tuning cannot add those DSP blocks.
+little margin at the slicer, so codewords arrive with 6-7 bit errors and the
+hardware sync word never matched at all: the frame never started, so nothing
+downstream could help.
 
-The only remaining K5-only path is to AC-couple the BK4819 AF output
-(U4 LM4890 `IN+`) to PA9/ADC_CH4 through a 100 nF capacitor and run the K1
-`pa4_sampler.c` + `lbj_dual.c` software demodulator on the MCU, reusing
-`lbj_dec`. That requires opening the radio and soldering; it is not implemented.
+Turning the hardware sync off is the fix. The slicer still has those errors,
+but the bit stream keeps flowing and `lbj_dec.c` can align on a sync that is
+only 3 bits away from the ideal one, then let the BCH repair the codewords.
+No hardware modification is needed for this path.
+
+The PA9 audio tap + K1 `pa4_sampler.c` software demodulator remains an option
+for a better slicer, but it is no longer the only way in.
 
 ## Flash budget
 
-- Current LBJ build: **58992 bytes**, about **2.4 KiB free**.
+- Current LBJ build: **59492 bytes** with GCC 10.3 `-Os`, about **6.0 KiB
+  free**; the upstream `-Oz` build is ~58992 bytes.
 - TDCS and LBJ do not fit together.
-- The PA9 sampler + software demod needs roughly 4-6 KiB, so a dedicated LBJ
-  build would have to disable FM radio and UART.
 
 ## Build
 
@@ -100,11 +105,13 @@ The only remaining K5-only path is to AC-couple the BK4819 AF output
 make ENABLE_TDCS=0 ENABLE_LBJ=1 ENABLE_LBJ_TX=0 TARGET=f4hwn.lbj
 ```
 
+- `ENABLE_LBJ_HWSYNC=1` restores the old hardware-sync/`DONE` batch path for an
+  A/B comparison. The default (0) is the raw-FSK path described above.
 - `ENABLE_LBJ_TX=1` enables the PTT test transmitter (fixed `1234000` /
   function 3 frame).
 - LBJ and TDCS **cannot be enabled together**; they do not fit in 60 KiB.
-- Prebuilt firmware: `compiled-firmware/f4hwn.lbj.bin` (58992 bytes, version
-  string `LBJ v1.0.3`).
+- Prebuilt firmware: `compiled-firmware/f4hwn.lbj.bin` (version string
+  `LBJ v1.0.3`).
 
 ## Usage
 
@@ -117,11 +124,15 @@ make ENABLE_TDCS=0 ENABLE_LBJ=1 ENABLE_LBJ_TX=0 TARGET=f4hwn.lbj
    - `F<frames> C<profile> 5C=xx <order>`
 3. `UP` / `DOWN`: cycle the nine RX front-end profiles (C0-C8).
 4. `*`: cycle bit order/polarity `M/L/I/J`.
-5. `PTT`: swallowed when `ENABLE_LBJ_TX=0`; sends the fixed test frame when
+5. Long `*`: the DIAG page (`R58/R59/R30`, `IRQ/FSK`, `FIF/OV/SYNC`,
+   `OK/BAD/FIN`, band, profile). `2` clears the counters. Expected on air:
+   `FIF` climbing with `OV 0`, then `SYNC` and `OK` climbing; `BAD` far above
+   `OK` means the front-end profile is wrong.
+6. `PTT`: swallowed when `ENABLE_LBJ_TX=0`; sends the fixed test frame when
    `ENABLE_LBJ_TX=1`.
-6. The FSK engine stops while the squelch is closed, so stale FIFO words cannot
+7. The FSK engine stops while the squelch is closed, so stale FIFO words cannot
    pile up.
-7. The short block `1233999/1234000` is kept in its own buffer so the detail
+8. The short block `1233999/1234000` is kept in its own buffer so the detail
    block `1234001/1234002` cannot overwrite it.
 
 ## UART raw dump
